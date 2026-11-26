@@ -9,6 +9,7 @@ to fp32 periodically) with ``t`` rescaled per channel afterwards.
 Nothing here runs unless ``CONFIG`` is set; the bf16 route is bit-identical with it unset.
 """
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
 import ctypes
 import os
 from dataclasses import dataclass, field
@@ -59,7 +60,7 @@ _lt = None
 REQUESTED = 8  # heuristic candidates kept (algo sweeps ask for more)
 ALGO_INDEX: dict = {}  # (n, batch) -> index of the heuristic candidate used (default 0)
 FAST_ACCUM = (
-    os.environ.get("MINIWORLD_TRIMUL_FP8_FASTACC") == "1"
+    os.environ.get("FOLDJET_ENGINE_TRIMUL_FP8_FASTACC") == "1"
 )  # cuBLASLt fast accumulation (opt-in: contraction 1.07-1.08x at L>=1024, error vs fp32 +0.03% on top of the 0.17% bf16 output rounding; plans are keyed on it)
 
 

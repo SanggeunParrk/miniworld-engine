@@ -194,7 +194,7 @@ def test_safe_preset_and_route_stats(f8):
 
 @pytest.mark.parametrize("module,pick", [("AtomDiTOpenFold3", None), ("AtomDiTProtenix", None)])
 def test_compiled_block_is_finite_and_equals_eager(f8, module, pick):
-    """Regression (5090-int, FoldForge AF3 5I28 n = 4 under torch.compile gave non-finite coordinates): the e4m3 block is ONE opaque op, so a
+    """Regression (5090-int, FoldJet AF3 5I28 n = 4 under torch.compile gave non-finite coordinates): the e4m3 block is ONE opaque op, so a
     compiled step runs the eager launches: finite and at the eager e4m3 call (the compiled glue around the op may round differently)."""
     import torch._dynamo
 

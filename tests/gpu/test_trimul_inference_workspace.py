@@ -1,4 +1,4 @@
-"""FoldForge 5I28 (OpenDDE n = 16): the structural-token refiner runs TriangleMultiplication at d_pair 384 on S = 3968 tokens, an
+"""FoldJet 5I28 (OpenDDE n = 16): the structural-token refiner runs TriangleMultiplication at d_pair 384 on S = 3968 tokens, an
 11.26 GiB pair. The H100 / A100 TriMul inference kept its a | b planes (two pair sizes) alive while it allocated the output, so one
 call peaked at x + planes + contraction + y = 5 pair sizes and the refiner's second update ran out of an 80 GB card. The planes are dead
 once contracted and are now freed before the output is allocated: the call's own peak (above the input) is planes + contraction

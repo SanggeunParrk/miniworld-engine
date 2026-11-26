@@ -12,7 +12,7 @@ warmup, median of ``iterations`` replays). ``fp8.check()`` is read again after t
 (``routes_fired``): a case below a route's length gate runs the default kernels in both copies (ratio ~ 1) and says so.
 
 ``--gates shipped``: the routes' production gates (what ``engine-fp8`` does for a user). ``--gates none``: every length / S gate removed
-(MINIWORLD_TRIMUL_FP8_MINL=0 and the TriAttn gates of h100_sm90 cleared), as the FP8 measurements of the 3.0 tree did.
+(FOLDJET_ENGINE_TRIMUL_FP8_MINL=0 and the TriAttn gates of h100_sm90 cleared), as the FP8 measurements of the 3.0 tree did.
 On a card without FP8 routes (not an H100) the FP8 copy runs the default kernels: ``routes_fired`` is False and the records say so.
 Training is not measured: no FP8 backward exists, ``engine-fp8`` runs the default path in training.
 """
@@ -72,11 +72,11 @@ def _steps(base, inputs, autocast):
 def main(argv=None) -> int:
     args = _parse(argv)
     if args.gates == "none":
-        os.environ["MINIWORLD_TRIMUL_FP8_MINL"] = "0"  # before the first import of the kernels
-        os.environ["MINIWORLD_TRIATTN_B200_FP8_MINS"] = "0"  # the B200 TriAttn gate (a no-op on every other card)
-        os.environ["MINIWORLD_TRIATTN_SM120_FP8_MINL"] = "0"  # the RTX 5090 e4m3 TriAttn gate (a no-op on every other card)
-        os.environ["MINIWORLD_TRIATTN_SM120_FP8_PVONLY"] = "1"  # and its PV-only core (unfused kinds; off when shipped)
-        os.environ.setdefault("MINIWORLD_TOKEN_DIT_FP8_MIN_ROWS", "0")  # the token DiT row gates
+        os.environ["FOLDJET_ENGINE_TRIMUL_FP8_MINL"] = "0"  # before the first import of the kernels
+        os.environ["FOLDJET_ENGINE_TRIATTN_B200_FP8_MINS"] = "0"  # the B200 TriAttn gate (a no-op on every other card)
+        os.environ["FOLDJET_ENGINE_TRIATTN_SM120_FP8_MINL"] = "0"  # the RTX 5090 e4m3 TriAttn gate (a no-op on every other card)
+        os.environ["FOLDJET_ENGINE_TRIATTN_SM120_FP8_PVONLY"] = "1"  # and its PV-only core (unfused kinds; off when shipped)
+        os.environ.setdefault("FOLDJET_ENGINE_TOKEN_DIT_FP8_MIN_ROWS", "0")  # the token DiT row gates
     import torch
     from paper_common import cfg as cfgmod
     from paper_common import provenance

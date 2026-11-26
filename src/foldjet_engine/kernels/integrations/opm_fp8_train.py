@@ -14,8 +14,8 @@ Scales    per tensor, powers of two, from bounds (nothing can saturate, no calib
           (Cauchy-Schwarz), x (1 + 2^-6) for the bf16 rounding of dz / n, to the next power of two over the format's max (448 / 57344).
           The mean normalisation by the pair count stays exact: the count table is the default's fp32 integer table, divided in fp32.
 
-Switch: ``MINIWORLD_OPM_FP8_TRAIN`` = ``e4m3`` (dO e4m3, measured more accurate) | ``e5m2`` (dO e5m2) | unset / empty / ``0`` (off); ``MINIWORLD_FP8_TRAIN=1`` turns it on
-as ``e4m3`` unless the per-module variable is set.  ``MINIWORLD_OPM_FP8_TRAIN_MINS=<s>``: the padded-depth gate (default 1024; 0 = none).
+Switch: ``FOLDJET_ENGINE_OPM_FP8_TRAIN`` = ``e4m3`` (dO e4m3, measured more accurate) | ``e5m2`` (dO e5m2) | unset / empty / ``0`` (off); ``FOLDJET_ENGINE_FP8_TRAIN=1`` turns it on
+as ``e4m3`` unless the per-module variable is set.  ``FOLDJET_ENGINE_OPM_FP8_TRAIN_MINS=<s>``: the padded-depth gate (default 1024; 0 = none).
 Eager autograd only (not under torch.compile); H100 sm_90a, bf16 activations, batch 1, the ``opm_train`` widths; everything else, and the
 switch off, runs the default ``opm_train`` path unchanged.
 """
@@ -27,40 +27,42 @@ import weakref
 
 import torch
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
+
 E4M3_MAX = 448.0
 E5M2_MAX = 57344.0
 
 
 def _mode() -> str | None:
-    v = os.environ.get("MINIWORLD_OPM_FP8_TRAIN")
-    if v is None and os.environ.get("MINIWORLD_FP8_TRAIN", "").strip().lower() in ("1", "on", "true"):
+    v = os.environ.get("FOLDJET_ENGINE_OPM_FP8_TRAIN")
+    if v is None and os.environ.get("FOLDJET_ENGINE_FP8_TRAIN", "").strip().lower() in ("1", "on", "true"):
         v = "e4m3"
     v = (v or "").strip().lower()
     if v in ("", "0", "off", "none"):
         return None
     if v not in ("e5m2", "e4m3"):
-        raise ValueError(f"MINIWORLD_OPM_FP8_TRAIN={v!r}: use e5m2, e4m3 or off")
+        raise ValueError(f"FOLDJET_ENGINE_OPM_FP8_TRAIN={v!r}: use e5m2, e4m3 or off")
     return v
 
 
 #: dO format (None: the route is off). Module globals: may be set at run time before a forward.
 MODE: str | None = _mode()
-MIN_S = int(os.environ.get("MINIWORLD_OPM_FP8_TRAIN_MINS", "1024"))
+MIN_S = int(os.environ.get("FOLDJET_ENGINE_OPM_FP8_TRAIN_MINS", "1024"))
 #: round 2: shape gate. Round 1 lost at L128 (1.15x) and d_pair 384 / 512 (1.09-1.14x); with the scale pass and the transposes gone L128 is 0.91x, d_pair 384 0.98x, d_pair 512 still 1.03x -> d_pair <= 384 served, 0 = no gate
-MIN_L = int(os.environ.get("MINIWORLD_OPM_FP8_TRAIN_MINL", "0"))
-MAX_CZ = int(os.environ.get("MINIWORLD_OPM_FP8_TRAIN_MAXCZ", "384"))
+MIN_L = int(os.environ.get("FOLDJET_ENGINE_OPM_FP8_TRAIN_MINL", "0"))
+MAX_CZ = int(os.environ.get("FOLDJET_ENGINE_OPM_FP8_TRAIN_MAXCZ", "384"))
 #: round 3: per-d_pair minimum padded-free length (measured, vs the 3.0.1 default step: d128 wins from L128 (0.90-0.96x), d256 from L256 (0.96x; L128 0.985x = noise), d384 from L384 (0.97x; L256 0.987x, L128 1.04x); d512 never (1.025x)). Ignored when MAX_CZ = 0 (gate off, benchmarks)
 MIN_L_BY_CZ = {128: 0, 256: 256, 384: 384}
 #: round 2: delayed dO scale (amax history, no pass over dz; first call of a module seeds from the bound); False = round 1's bound every call
-DELAYED = os.environ.get("MINIWORLD_OPM_FP8_TRAIN_DELAYED", "1") != "0"
+DELAYED = os.environ.get("FOLDJET_ENGINE_OPM_FP8_TRAIN_DELAYED", "1") != "0"
 #: round 2: one dgrad pass writes both dO planes (d_pair 128; the transposed plane is staged in shared memory); False = round 1: two launches
-SINGLE = os.environ.get("MINIWORLD_OPM_FP8_TRAIN_SINGLE", "1") != "0"
-HISTORY = int(os.environ.get("MINIWORLD_OPM_FP8_TRAIN_HISTORY", "16"))
+SINGLE = os.environ.get("FOLDJET_ENGINE_OPM_FP8_TRAIN_SINGLE", "1") != "0"
+HISTORY = int(os.environ.get("FOLDJET_ENGINE_OPM_FP8_TRAIN_HISTORY", "16"))
 #: round 4: how the product O (the dominant saved tensor: 32N x 32N bf16, ~85 % of the saved bytes at S 1024) is kept for dW_o:
 #: "bf16" (rounds 1-3), "fp8" (e4m3 x a power-of-two scale, dequantised in backward), "recompute" (the FP8 product is redone in backward)
-OSTORE = os.environ.get("MINIWORLD_OPM_FP8_TRAIN_OSTORE", "bf16")
+OSTORE = os.environ.get("FOLDJET_ENGINE_OPM_FP8_TRAIN_OSTORE", "bf16")
 _OCHUNK = 2048  # rows of O per conversion chunk (O is [32N, 32N])
-MARGIN = float(os.environ.get("MINIWORLD_OPM_FP8_TRAIN_MARGIN", "2"))
+MARGIN = float(os.environ.get("FOLDJET_ENGINE_OPM_FP8_TRAIN_MARGIN", "2"))
 STATS = {"calls": 0}
 _SITES: dict = {}  # (device, wo data_ptr) -> _DSite
 _RETIRED: list = []

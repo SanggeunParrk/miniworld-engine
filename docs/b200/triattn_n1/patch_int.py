@@ -24,8 +24,8 @@ p = K + "integrations/bidir_triattn_h100.py"; s = open(p).read()
 anchor = "def _mm_f32(a, b):"
 helper = '''#: (N1, cuda:b200_sm100 71 / Bidirectional 5) the bias-only paths' LayerNorm backward (C = 128) on the B200 kernel of
 #: ``b200_sources/lnbwd_sm100.cu``: x / dyln / dy of a row in flight together and a row step ahead, 2 CTAs an SM (fewer partial rows for the
-#: column sum). dx bitwise equal, d gamma / d beta fp32 sums regrouped. MINIWORLD_BIDIR_B200_LNBWD=0 turns it off.
-B200_LNBWD = os.environ.get("MINIWORLD_BIDIR_B200_LNBWD", "1") != "0"
+#: column sum). dx bitwise equal, d gamma / d beta fp32 sums regrouped. FOLDJET_ENGINE_BIDIR_B200_LNBWD=0 turns it off.
+B200_LNBWD = os.environ.get("FOLDJET_ENGINE_BIDIR_B200_LNBWD", "1") != "0"
 
 
 def _ln_bwd(g, dyln, x, dy, lnw, mean, rstd, L):

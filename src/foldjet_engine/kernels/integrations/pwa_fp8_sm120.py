@@ -16,8 +16,8 @@ Scales: w are probabilities (fixed 2^8, no saturation); v takes a static power-o
 the module's first eager call; keyed by the value weight). Both are cuBLASLt scale pointers (device scalars: ``rescale_all`` updates them in place,
 captured graphs follow). Guard: the max |v / scale| (``take_overflow`` / ``overflow_peak``); ``GUARD`` ``sync`` redoes a saturating eager call, ``lazy``
 leaves it to ``fp8.check()``. Same interface as ``pwa_fp8`` (``ENABLED``, ``GUARD``, ``STATS``, ``take_overflow``, ``rescale_all``); registered in
-``fp8.SM120_ROUTES["pwa"]``. Switches: ``MINIWORLD_PWA_FP8=1`` (in ``safe``), ``MINIWORLD_PWA_FP8_GUARD``, ``MINIWORLD_PWA_FP8_HEADROOM``,
-``MINIWORLD_PWA_FP8_SM120_MINSN`` (smallest S * N served at the native widths, :data:`MIN_SN`), ``MINIWORLD_PWA_FP8_SM120_BIG_MINSN`` (BIG).
+``fp8.SM120_ROUTES["pwa"]``. Switches: ``FOLDJET_ENGINE_PWA_FP8=1`` (in ``safe``), ``FOLDJET_ENGINE_PWA_FP8_GUARD``, ``FOLDJET_ENGINE_PWA_FP8_HEADROOM``,
+``FOLDJET_ENGINE_PWA_FP8_SM120_MINSN`` (smallest S * N served at the native widths, :data:`MIN_SN`), ``FOLDJET_ENGINE_PWA_FP8_SM120_BIG_MINSN`` (BIG).
 """
 
 from __future__ import annotations
@@ -27,15 +27,16 @@ import weakref
 
 import torch
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
 from foldjet_engine.fp8 import env as _fp8_env
 
 E4M3_MAX = 448.0
 W_SCALE = 2.0**-8
-ENABLED = _fp8_env("MINIWORLD_PWA_FP8") == "1"
+ENABLED = _fp8_env("FOLDJET_ENGINE_PWA_FP8") == "1"
 #: ``calls`` = native widths, ``wide_calls`` = the BIG width, ``retries`` = eager saturation redos, ``declined`` = calls the gate sent to the default
 STATS = {"calls": 0, "wide_calls": 0, "retries": 0, "declined": 0, "calibrations": 0}
-GUARD = os.environ.get("MINIWORLD_PWA_FP8_GUARD", "sync")
-HEADROOM = float(os.environ.get("MINIWORLD_PWA_FP8_HEADROOM", "16"))
+GUARD = os.environ.get("FOLDJET_ENGINE_PWA_FP8_GUARD", "sync")
+HEADROOM = float(os.environ.get("FOLDJET_ENGINE_PWA_FP8_HEADROOM", "16"))
 RESCALE = 4.0
 
 
@@ -46,9 +47,9 @@ def _env_int(name: str, default: int) -> int:
 
 #: smallest S * N served per (d_msa, C) at the native widths (same-process A-B, docs/fp8.md "RTX 5090"); 0 = no gate
 MIN_SN: dict = {(64, 8): 1 << 15, (64, 16): 1 << 15, (64, 32): 1 << 15, (128, 8): 1 << 15, (128, 16): 1 << 15}  # S128 N128: 0.97 (64 x 8); S128 N256: 1.05
-MIN_SN_ALL: int | None = int(os.environ["MINIWORLD_PWA_FP8_SM120_MINSN"]) if os.environ.get("MINIWORLD_PWA_FP8_SM120_MINSN") else None
+MIN_SN_ALL: int | None = int(os.environ["FOLDJET_ENGINE_PWA_FP8_SM120_MINSN"]) if os.environ.get("FOLDJET_ENGINE_PWA_FP8_SM120_MINSN") else None
 #: smallest S * N served at the BIG width
-BIG_MIN_SN = _env_int("MINIWORLD_PWA_FP8_SM120_BIG_MINSN", 1 << 14)  # the smallest measured cell (S64 N256: 1.03); every measured BIG cell gains
+BIG_MIN_SN = _env_int("FOLDJET_ENGINE_PWA_FP8_SM120_BIG_MINSN", 1 << 14)  # the smallest measured cell (S64 N256: 1.03); every measured BIG cell gains
 #: ln_vt8 tile (tokens) and resident CTAs per SM, per (d_msa, C)
 VT8_CFG: dict = {}
 

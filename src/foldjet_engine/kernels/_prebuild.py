@@ -16,7 +16,7 @@ a build helper reached, every ``.cu`` / ``.cpp`` file compiled by some artifact)
 **Arch.** ``--arch`` (default ``sm90a``: H100) picks the recipes' variants (and the target's SM count, which a few builds are
 specialized for). No device is queried: the arch an artifact is built for is the one its flags request.
 
-**Cache.** The artifacts go where the runtime looks: ``_nvcc.engine_jit_root()`` (``~/.cache/miniworld_engine_jit``), at
+**Cache.** The artifacts go where the runtime looks: ``_nvcc.engine_jit_root()`` (``~/.cache/foldjet_engine_jit``), at
 ``torch_extensions/<name>-<key16>/`` and ``<family>/<stem>-<key16>.cubin``. The key (``_codegraph``) covers the sources and
 headers reached, flags, torch / CUDA / Python versions. A key present in any root (``_nvcc.artifact_roots()``) is skipped, so a
 job that hits its time limit is resubmitted and continues. A build writes into a private temporary path that is renamed into
@@ -55,6 +55,7 @@ import time
 from collections.abc import Iterable
 from pathlib import Path
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
 from foldjet_engine.kernels import _nvcc
 
 KERNELS = Path(__file__).resolve().parent
@@ -620,11 +621,11 @@ def main(argv: list[str] | None = None) -> int:
 
     t = target(args.arch)
     if t.arch == "sm120":  # the sm_80 builders compile for sm_120a under <name>_sm120 (kernels/_sm120.py), here and in every worker
-        os.environ["MINIWORLD_ENGINE_BUILD_ARCH"] = "sm120"
+        os.environ["FOLDJET_ENGINE_BUILD_ARCH"] = "sm120"
     elif t.arch == "sm100":  # B200: the sm_80 builders it reuses (ProteinMPNN) compile for sm_100a under <name>_sm100 on any build host
-        os.environ["MINIWORLD_ENGINE_BUILD_ARCH"] = "sm100"
+        os.environ["FOLDJET_ENGINE_BUILD_ARCH"] = "sm100"
     elif t.arch in ("sm80", "sm90"):  # builders that pick a variant by the device (pair_embed_geom sm80/: the A100 vs the H100 gt2 build) plan the target on a GPU-less host
-        os.environ["MINIWORLD_ENGINE_BUILD_ARCH"] = t.arch
+        os.environ["FOLDJET_ENGINE_BUILD_ARCH"] = t.arch
     if args.cutlass:
         os.environ["CUTLASS_PATH"] = args.cutlass
     if args.mathdx:

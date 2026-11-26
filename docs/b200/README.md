@@ -96,5 +96,5 @@ TriAttn 67 (training; 66 inference)).
 Timing-only ablation macros that were default off and unrouted (the `WF_NO*` / `WT_NO*` / `FR_NO*` / `WG_NO*` families of the wide
 TriAttn kernels, `K3W_ABL_*`, `K3W_T2`, `TA_FTL`, probe `#ifdef` blocks, the fused small-L TriMul backward `b7f`) were removed in the
 finalisation pass. A kernel that stays behind an environment switch is documented in its note ("A / B" switches such as
-`MINIWORLD_*_B200_*`, `MW_LD*`); timer instrumentation macros (`*_TL`, `TRACE`) stay because Python builds them for the measurements
+`FOLDJET_ENGINE_*_B200_*`, `MW_LD*`); timer instrumentation macros (`*_TL`, `TRACE`) stay because Python builds them for the measurements
 the notes quote.

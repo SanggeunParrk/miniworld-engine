@@ -1,4 +1,4 @@
-"""A100 (sm_80) Transition past one call's rows (FoldForge 5I28: the template pair stack at 4 x 2048^2 rows, the protenix confidence block's
+"""A100 (sm_80) Transition past one call's rows (FoldJet 5I28: the template pair stack at 4 x 2048^2 rows, the protenix confidence block's
 pair transition at 5 x 1536^2). The one-kernel forward's per-CTA work list holds 253 tiles per SM and the wide chain's GEMM grid 65 535
 tiles of 128 rows; the cuda backend raised ``fwd: too many work items per CTA`` / ``invalid configuration argument`` there. Inference now
 runs one call per contiguous row block (``kernels.transition.cuda.transition_sm80``); a training call past the limit is refused with a

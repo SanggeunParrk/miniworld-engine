@@ -25,7 +25,7 @@ prebuilt kernels wheel (B200: two). Other CUDA cards run the `triton` and `pytor
 | [measure.md](measure.md) | the accuracy measurer (fp64 gold, lights) and the speed measurer (CUDA-graph timing) |
 | [judge.md](judge.md) | versions, tokens, verdicts (carried / owed / pending), the Slurm measurement cycle, when to bump what |
 | [ladder.md](ladder.md) | the performance ladder cuda < triton < pytorch: how it is checked, exceptions (LayerNorm, RMSNorm, L <= 256) |
-| [release-notes/](release-notes/README.md) | one file per release (2.5.9 .. 3.0.12 as miniworld-engine, then foldjet-engine 1.0.0) and the release steps they record |
+| [release-notes/](release-notes/README.md) | one file per release (2.5.9 .. 3.0.12 as foldjet-engine, then foldjet-engine 1.0.0) and the release steps they record |
 
 ## Per-card kernel notes
 

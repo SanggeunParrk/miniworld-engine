@@ -3,7 +3,7 @@ sm_80-family ``cuda`` path at inference (``conditioned_transition_sm80.inference
 row pass, cached weight casts).
 
 Before (TokenDiTBoltz2 cuda:5090_sm120 2), the token DiT ran this transition as the module's own statements: every call cast the fp32 master
-weights to bf16 (seven casts a block) and ran six split-K cuBLAS GEMMs -- FoldForge Boltz-2 5I28 n = 1 spent ~0.55 s of its 1.42 s there.
+weights to bf16 (seven casts a block) and ran six split-K cuBLAS GEMMs -- FoldJet Boltz-2 5I28 n = 1 spent ~0.55 s of its 1.42 s there.
 A gradient, and the A100, keep the module's statements (``serves`` refuses them).
 """
 
@@ -69,7 +69,7 @@ def test_transition_vs_fp64(dtype: torch.dtype, shared: bool) -> None:
 @pytest.mark.skipif(not _SM120, reason="RTX 5090 (sm_120) cuda path")
 @pytest.mark.parametrize("length", [128, 256])
 def test_token_dit_master_cuda_serves_and_matches(length: int) -> None:
-    """The block (bf16 activations, fp32 master weights under bf16 autocast, the conditioning shared by 5 samples as FoldForge passes it):
+    """The block (bf16 activations, fp32 master weights under bf16 autocast, the conditioning shared by 5 samples as FoldJet passes it):
     the cuda route runs the transition on ``inference_up`` and stays within the pytorch error of the fp64 reference."""
     m = _block()
     g = torch.Generator(device="cuda").manual_seed(1)

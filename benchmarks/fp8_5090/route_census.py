@@ -1,21 +1,21 @@
-"""RTX 5090 FP8 route census: which ``engine-fp8`` routes one FoldForge predictor reaches on this card, per slot (``fp8.route_stats()``).
+"""RTX 5090 FP8 route census: which ``engine-fp8`` routes one FoldJet predictor reaches on this card, per slot (``fp8.route_stats()``).
 
     python route_census.py --model af3 [--sizes 1 4] [--repeats 1] [--ff-repo ~/ff/FoldForge] [--out DIR] [--guard lazy|sync] [--no-fp8]
     python route_census.py --model af3 --dry          # the slot table only (module per slot, switches): no predictor is loaded
 
-Environment as FoldForge's ``engine_fp8`` arm (``benchmarks/paper/common/ffpaper.apply_arm_env``), set here before the engine is imported:
-``MINIWORLD_FP8=safe``, ``MINIWORLD_FP8_MODEL=<model>`` (TriAttn only for a model in ``fp8.TRIATTN_MODELS``), lazy guards (default; ``--guard sync``
-keeps the eager redo). Every other ``MINIWORLD_*FP8*`` variable of the caller is cleared first, so the census is the preset's. ``--no-fp8``: no FP8
+Environment as FoldJet's ``engine_fp8`` arm (``benchmarks/paper/common/ffpaper.apply_arm_env``), set here before the engine is imported:
+``FOLDJET_ENGINE_FP8=safe``, ``FOLDJET_ENGINE_FP8_MODEL=<model>`` (TriAttn only for a model in ``fp8.TRIATTN_MODELS``), lazy guards (default; ``--guard sync``
+keeps the eager redo). Every other ``FOLDJET_ENGINE_*FP8*`` variable of the caller is cleared first, so the census is the preset's. ``--no-fp8``: no FP8
 variable at all (every counter must stay 0: the default route).
 
-The predictor runs through FoldForge's engine backend on the 5I28 harness of the FoldForge checkout (``benchmarks/5i28_ff/run_5i28_ff.py``: real MSA +
+The predictor runs through FoldJet's engine backend on the 5I28 harness of the FoldJet checkout (``benchmarks/5i28_ff/run_5i28_ff.py``: real MSA +
 templates, ``make_config`` / ``make_spec``; the same inputs as F3), one forward call per size n (chains; 128 tokens a chain), ``--repeats`` warm repeats
 inside it. Before each size the counters are reset; after it the script prints, per slot of ``fp8.SLOTS``: the module that serves the slot on this
 card (an ``SM120_ROUTES`` module, or ``-`` when the slot keeps the H100 module, whose ``serves()`` is False off sm_90: no 5090 route yet), its switch
 (``fp8.status()``) and the non-zero counters; then ``fp8.check()`` (True: a static-scale route saturated during the call). One JSON line per size
 (``CENSUS {...}``) carries the same data for collection. The counters bump at Python / capture time: a CUDA-graph replay does not count again.
 
-Run on cssb-rtx under the GPU lock (``~/mwe/gpu.sh SECONDS python route_census.py ...``) with the FoldForge card environment
+Run on cssb-rtx under the GPU lock (``~/mwe/gpu.sh SECONDS python route_census.py ...``) with the FoldJet card environment
 (``benchmarks/paper/common/cards/rtx5090.env`` of the checkout) and the engine source on ``PYTHONPATH``.
 """
 
@@ -30,7 +30,7 @@ import time
 from pathlib import Path
 
 ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-ap.add_argument("--model", required=True, help="FoldForge model name (af3, protenix1, boltz2, chai1, ...)")
+ap.add_argument("--model", required=True, help="FoldJet model name (af3, protenix1, boltz2, chai1, ...)")
 ap.add_argument("--sizes", type=int, nargs="+", default=[1], help="5I28 chain counts (128 tokens a chain)")
 ap.add_argument("--repeats", type=int, default=1, help="warm repeats inside each forward call (benchmark_repeats)")
 ap.add_argument("--ff-repo", type=Path, default=Path(os.environ.get("FF_REPO", Path.home() / "ff/FoldForge")))
@@ -44,14 +44,14 @@ ap.add_argument("--patch", action="append", default=[], help="diagnostics: modul
 args = ap.parse_args()
 
 # ---- the engine_fp8 arm's environment, before the engine is imported
-for key in [k for k in os.environ if k.startswith("MINIWORLD_") and "FP8" in k]:
+for key in [k for k in os.environ if k.startswith("FOLDJET_ENGINE_") and "FP8" in k]:
     os.environ.pop(key)
 if not args.no_fp8:
-    os.environ["MINIWORLD_FP8"] = "safe"
-    os.environ["MINIWORLD_FP8_MODEL"] = args.model
+    os.environ["FOLDJET_ENGINE_FP8"] = "safe"
+    os.environ["FOLDJET_ENGINE_FP8_MODEL"] = args.model
     if args.guard == "lazy":
         for route in ("TRIMUL", "OPM", "PWA", "TRANSITION"):
-            os.environ[f"MINIWORLD_{route}_FP8_GUARD"] = "lazy"
+            os.environ[f"FOLDJET_ENGINE_{route}_FP8_GUARD"] = "lazy"
 
 import torch  # noqa: E402
 
@@ -101,12 +101,12 @@ print(table({}, STATUS, MODS), flush=True)
 if args.dry:
     sys.exit(0)
 
-# ---- the predictor through FoldForge's engine backend, on the 5I28 harness of the checkout
+# ---- the predictor through FoldJet's engine backend, on the 5I28 harness of the checkout
 sys.path.insert(0, str(args.ff_repo / "benchmarks/5i28_ff"))
 import run_5i28_ff as H  # noqa: E402
 import yaml  # noqa: E402
 
-import foldforge as ff  # noqa: E402
+import foldjet as ff  # noqa: E402
 
 out = args.out or Path(tempfile.mkdtemp(prefix="route_census_"))
 out.mkdir(parents=True, exist_ok=True)
@@ -128,7 +128,7 @@ for n in args.sizes:
         result = None
     except Exception as error:  # noqa: BLE001 - a failed size is data
         rec |= {"status": "failed", "error": str(error).splitlines()[0][:300] if str(error) else type(error).__name__}
-    # which backend served every engine class (FoldForge's helper, when the checkout has it): a Triton / PyTorch route in an engine run is a bug
+    # which backend served every engine class (FoldJet's helper, when the checkout has it): a Triton / PyTorch route in an engine run is a bug
     try:
         sys.path.insert(0, str(args.ff_repo / "benchmarks/paper/common"))
         import ffpaper

@@ -65,7 +65,7 @@ COND_WIDTHS_H100 = (384, 768)
 QK_WEIGHTS = ("attention.norm_query.weight", "attention.norm_key.weight")
 #: Packed runners keyed by the weights' (pointer, version): see ``_infer``.
 _RUNNERS: dict = _capture.weight_cache("token_dit.runners")
-#: the hoisted pair biases a runner keeps beyond the newest (bytes; ``_infer``): B200's per-trunk_seed steps of a B > 1 call (FoldForge R18:
+#: the hoisted pair biases a runner keeps beyond the newest (bytes; ``_infer``): B200's per-trunk_seed steps of a B > 1 call (FoldJet R18:
 #: 5 folds x [16, L, L] bf16 at L 256 = 10 MB) each find their fold's bias
 BIAS_CACHE_BYTES = 64 << 20
 
@@ -253,7 +253,7 @@ def serves(module, single, cond, pair, compute_dtype=None, extra=None):
         return False
     if single.ndim != 4 or single.shape[2] < 8:
         return False
-    # token_inference's pair: [B, L, L, w], one pair per trunk_seed (the 5I28 run of FoldForge: a call the gate claimed raised there)
+    # token_inference's pair: [B, L, L, w], one pair per trunk_seed (the 5I28 run of FoldJet: a call the gate claimed raised there)
     if pair.ndim != 4 or tuple(pair.shape[:3]) != (single.shape[1], single.shape[2], single.shape[2]):
         return False
     if single.shape[1] != 1 and not (
@@ -541,7 +541,7 @@ def update(module, single, cond, pair, mask, extra=None, args=None):
     weights, qk, eq, ek, heads, opts = infer_args(module, single.dtype) if args is None else args
     run = _infer_launch if _plain_eager(single) else _infer
     if single.shape[1] > 1 and torch.cuda.get_device_capability(single.device) == (10, 0) and single.shape[2] % 128:
-        # B200, B trunk_seeds (FoldForge R18's grouped sampler: [S, F, L, d], a pair per fold), L not a multiple of 128: one B = 1 step per
+        # B200, B trunk_seeds (FoldJet R18's grouped sampler: [S, F, L, d], a pair per fold), L not a multiple of 128: one B = 1 step per
         # trunk_seed on the composed runner (it takes one pair per call); L a multiple of 128 runs all folds in ONE ``token_inference`` call
         # (the GEMMs and row passes over every fold's rows, one core launch per fold)
         assert mask is not None  # filled above off sm_90

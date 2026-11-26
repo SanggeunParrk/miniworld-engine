@@ -22,6 +22,7 @@ multiple of 128. ``supported()`` is the whole gate; everything it rejects keeps 
 the weight gradients are summed in a fixed order (no atomics), so a replay is bit-identical.
 """
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
 import functools
 import os
 import re
@@ -136,10 +137,10 @@ def _driver_major() -> int | None:
 
 @functools.lru_cache(maxsize=1)
 def kernel_toolchain() -> tuple[str, tuple[int, int], tuple[str, ...]]:
-    """(nvcc, release, host flags) that build the kernel cubins: $MINIWORLD_TRANSITION_SM100_NVCC if set, else the newest of
+    """(nvcc, release, host flags) that build the kernel cubins: $FOLDJET_ENGINE_TRANSITION_SM100_NVCC if set, else the newest of
     ``/usr/local/cuda*/bin/nvcc`` and the torch-matched nvcc that knows sm_100, is no newer (major) than the driver, and can
     drive a host compiler."""
-    override = os.environ.get("MINIWORLD_TRANSITION_SM100_NVCC") or None
+    override = os.environ.get("FOLDJET_ENGINE_TRANSITION_SM100_NVCC") or None
     cands = [override] if override else [*map(str, Path("/usr/local").glob("cuda*/bin/nvcc")), nvcc_path()]
     driver_major = _driver_major()
     found = {}

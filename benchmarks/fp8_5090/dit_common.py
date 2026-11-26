@@ -2,7 +2,7 @@
 
 Blocks come from the measurers' registry rows (``foldjet_engine.measure.config``): eval, ``master`` (fp32 parameters, bf16 activations), the
 module's first eval / master row (Token DiT: ``d_pair = 128`` where the class has it), with the length / samples replaced and the conditioning
-shared by the samples (the ``*_shared_cond`` stream: FoldForge's samplers call the blocks that way)."""
+shared by the samples (the ``*_shared_cond`` stream: FoldJet's samplers call the blocks that way)."""
 
 from __future__ import annotations
 
@@ -104,7 +104,7 @@ _FLUSH: list = []
 
 def graph(f, n: int = 3, flush: bool = True):
     """A CUDA graph of ``n`` calls of ``f`` (each after a 128 MB L2 flush when ``flush``) and one of the flushes alone, captured under
-    ``static_weights()`` + ``static_inputs()`` (as FoldForge's sampler graphs: weight forms and hoisted tables are made by the eager warm-up,
+    ``static_weights()`` + ``static_inputs()`` (as FoldJet's sampler graphs: weight forms and hoisted tables are made by the eager warm-up,
     a replay reads them). Returns (graph, flush graph, the static-tables handle: keep it while the graph is replayed)."""
     from foldjet_engine.kernels import _capture
 

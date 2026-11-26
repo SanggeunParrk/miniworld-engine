@@ -338,6 +338,6 @@ def test_shipped_gates_are_the_measured_ones() -> None:
     """The gates as shipped (docs/b200/fp8.md "TriAttn e4m3 q / k"): read from the module, not from an environment variable of this process."""
     import os
 
-    if "MINIWORLD_TRIATTN_B200_FP8_QK_MINS" not in os.environ:
+    if "FOLDJET_ENGINE_TRIATTN_B200_FP8_QK_MINS" not in os.environ:
         assert set(_SHIPPED) == {"fused", "unfused", "d64"}
         assert _SHIPPED["fused"] == 1024 and _SHIPPED["unfused"] == 1024 and _SHIPPED["d64"] >= 1 << 30  # measured: the front-written e4m3 rows win from S = 1024; the 64-channel core has no front

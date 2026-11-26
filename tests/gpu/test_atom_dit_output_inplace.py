@@ -1,4 +1,4 @@
-"""R20 (FoldForge): the H100 atom-DiT block output must accept an in-place write while autograd records (a custom-Function output
+"""R20 (FoldJet): the H100 atom-DiT block output must accept an in-place write while autograd records (a custom-Function output
 that is a view refuses it), and the gradients must be those of the out-of-place form."""
 
 import typing

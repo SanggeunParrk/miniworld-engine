@@ -3,7 +3,7 @@ d_pair = d_hidden = 128 with 4 heads x 32 on the fused kernels (``FUSED``: tri_f
 tri_wgrad around the attention core), d_pair 64-512 with heads of 16 / 32 / 64 / 96 / 128 channels on the wide kernels (``GENERIC``: tri_wfront /
 tri_wtail / tri_wgbwd / tri_whbwd / cuBLAS / tri_wfinish), both in ``kernels/triangle_attention/cuda/b200_triattn.py``.
 
-The model options FoldForge's families set (``_options``) run on the same kernels: AlphaFold 3's ending-node bias orientation
+The model options FoldJet's families set (``_options``) run on the same kernels: AlphaFold 3's ending-node bias orientation
 (``transposed_bias=False``: both paths for inference, the wide path for training), and on the wide path, inference and training,
 RoseTTAFold3's gate / out-projection biases, heads of 64 channels (Chai-1, RoseTTAFold3's templates, IntelliFold-2: the head-dim-64
 core and its backward), heads of 96 / 128 channels (AF3's four heads at d_pair 384 / 512: the head-dim-128 core and its backward, 96

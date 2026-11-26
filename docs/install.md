@@ -44,8 +44,8 @@ Python versions, the CUTLASS / MathDx release; `kernels/_codegraph.py`). An arti
    (RTX 5090) and `-sm100-cu129` + `-sm100-cu129-part2` (B200; split in two for PyPI's 100 MiB per-file limit) wheels, which `pip`
    installs automatically on Linux x86_64 with CPython 3.12 (the versions are pinned to the engine's). They hold the builds for
    torch 2.13 / CUDA 12.9 (one directory, content-keyed paths: no per-arch subdirectory). Before 1.0.0 these wheels were
-   `miniworld-engine-kernels-*`.
-2. the JIT cache, `$XDG_CACHE_HOME/miniworld_engine_jit` (default `~/.cache/miniworld_engine_jit`; the cache and `MINIWORLD_*` names were kept
+   `foldjet-engine-kernels-*`.
+2. the JIT cache, `$XDG_CACHE_HOME/foldjet_engine_jit` (default `~/.cache/foldjet_engine_jit`; the cache and `FOLDJET_ENGINE_*` names were kept
    by the 1.0.0 rename so existing caches stay valid).
 
 A key found in neither is compiled on first use into the JIT cache, under a file lock (one process builds, the others wait). Each build
@@ -70,12 +70,12 @@ Where the headers are taken from, first hit wins (`kernels/_headers.py`):
 
 | | CUTLASS | MathDx |
 |---|---|---|
-| 1. environment | `CUTLASS_PATH` = a CUTLASS checkout (`$CUTLASS_PATH/include/cute/tensor.hpp`) | `MINIWORLD_MATHDX_HOME`, `MATHDX_HOME` or `NVIDIA_MATHDX_HOME` = a mathdx root (`include/cublasdx.hpp`) |
+| 1. environment | `CUTLASS_PATH` = a CUTLASS checkout (`$CUTLASS_PATH/include/cute/tensor.hpp`) | `FOLDJET_ENGINE_MATHDX_HOME`, `MATHDX_HOME` or `NVIDIA_MATHDX_HOME` = a mathdx root (`include/cublasdx.hpp`) |
 | 2. installed distribution | `nvidia-cutlass==4.2.0.0` (its `cutlass_library/source/include`) | `nvidia-mathdx` (`nvidia/mathdx`) |
 | 3. header cache | `<cache>/cutlass-4.2.0.0` | `<cache>/mathdx-25.6.0` |
 
-`<cache>` is `$MINIWORLD_ENGINE_HEADER_CACHE`, else `$XDG_CACHE_HOME/miniworld_engine_headers` (default
-`~/.cache/miniworld_engine_headers`). When a build needs headers that none of the three provides, the pinned wheel is downloaded from
+`<cache>` is `$FOLDJET_ENGINE_HEADER_CACHE`, else `$XDG_CACHE_HOME/foldjet_engine_headers` (default
+`~/.cache/foldjet_engine_headers`). When a build needs headers that none of the three provides, the pinned wheel is downloaded from
 PyPI (`nvidia-cutlass` 4.2.0.0: 6.4 MB; `nvidia-mathdx` 25.6.0: 23 MB), its SHA-256 checked against the value pinned in
 `_headers.py`, and only the header tree unpacked into the cache. The `nvidia-cutlass` 4.2.0.0 wheel carries the complete `include/` tree
 of the CUTLASS v4.2.0 release, file for file identical to the v4.2.0 git tag the prebuilt kernels are built with.
@@ -97,7 +97,7 @@ pip install --no-deps nvidia-cutlass==4.2.0.0 nvidia-mathdx==25.6.0   # into the
 export CUTLASS_PATH=/path/to/cutlass-v4.2.0                  # or point at a checkout
 ```
 
-`python -m foldjet_engine.kernels._headers show` prints what is found. `MINIWORLD_ENGINE_NO_DOWNLOAD=1` forbids the download (a
+`python -m foldjet_engine.kernels._headers show` prints what is found. `FOLDJET_ENGINE_NO_DOWNLOAD=1` forbids the download (a
 build that needs missing headers then fails with the options above).
 
 ## Environment variables
@@ -105,12 +105,12 @@ build that needs missing headers then fails with the options above).
 | variable | effect |
 |---|---|
 | `CUTLASS_PATH` | CUTLASS checkout for builds (overrides the pinned headers) |
-| `MINIWORLD_MATHDX_HOME` / `MATHDX_HOME` / `NVIDIA_MATHDX_HOME` | mathdx root for builds |
-| `MINIWORLD_ENGINE_HEADER_CACHE` | where fetched headers are kept |
-| `MINIWORLD_ENGINE_NO_DOWNLOAD` | `1`: never download headers |
-| `XDG_CACHE_HOME` | base of the JIT cache (`miniworld_engine_jit`) and the header cache |
+| `FOLDJET_ENGINE_MATHDX_HOME` / `MATHDX_HOME` / `NVIDIA_MATHDX_HOME` | mathdx root for builds |
+| `FOLDJET_ENGINE_HEADER_CACHE` | where fetched headers are kept |
+| `FOLDJET_ENGINE_NO_DOWNLOAD` | `1`: never download headers |
+| `XDG_CACHE_HOME` | base of the JIT cache (`foldjet_engine_jit`) and the header cache; a cache under the pre-1.0.0 names (`miniworld_engine_jit`, `miniworld_engine_headers`) keeps being used while the new one does not exist |
 | `CUDA_HOME` / `CUDA_PATH` | CUDA toolkit for builds (an `nvcc` in the Python environment's `bin/` is preferred, then this, then `PATH`, then `/usr/local/cuda*`; the one matching `torch.version.cuda` wins) |
-| `MINIWORLD_ENGINE_HOST_CXX` | host compiler for nvcc (default: the first `g++` that compiles a CUDA probe) |
+| `FOLDJET_ENGINE_HOST_CXX` | host compiler for nvcc (default: the first `g++` that compiles a CUDA probe) |
 
 ## Troubleshooting
 
@@ -123,7 +123,7 @@ build that needs missing headers then fails with the options above).
 - **`nvcc fatal: Unsupported gpu architecture`** or a toolkit mismatch: set `CUDA_HOME` to a toolkit of the same release as
   `torch.version.cuda`.
 - **Host-compiler parse errors in libstdc++ headers** (`__is_array`, `0.0bf16`): GCC 14 with nvcc 12.x; install GCC <= 13 and/or set
-  `MINIWORLD_ENGINE_HOST_CXX`.
+  `FOLDJET_ENGINE_HOST_CXX`.
 - **A build seems to hang**: another process holds the build lock of the same artifact (the waiter prints a line a minute). A killed
   build leaves no lock behind.
 - **`CUDA driver version is insufficient`**: the torch build or the prebuilt kernels need a newer driver; install a torch wheel for your

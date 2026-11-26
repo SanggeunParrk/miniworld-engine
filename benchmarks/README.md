@@ -14,7 +14,7 @@ Two kinds of folders live here.
 | `bias_logits_modes.py` | experiment driver | speed / memory of the bias-only token DiT logit modes ([docs/bias_logits.md](../docs/bias_logits.md)) |
 
 The experiment records are kept as they were run (paths inside job scripts may name the scratch trees they ran in); nothing in the
-package imports them. Model-level benchmarks (FoldForge against the Anthropic kits, the 5I28 benchmark) belong to FoldForge, not here.
+package imports them. Model-level benchmarks (FoldJet against the Anthropic kits, the 5I28 benchmark) belong to FoldJet, not here.
 
 ## Generated per-card folders
 

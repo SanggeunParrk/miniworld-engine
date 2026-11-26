@@ -3,7 +3,7 @@
 
 Scales are powers of two and exact: the weights per 64-row unit / matrix (here, once per weight version), the activations per row inside the kernels from
 the row's exact amax (dynamic: no calibration, no overflow guard -- an e4m3 cast cannot saturate). Served by
-``kernels/integrations/local_dit_h100._fwd`` when ``local_dit_h100.FP8_ROWS`` is set (``MINIWORLD_ATOMDIT_FP8=1`` / ``pre`` / ``post`` at import, or ``enable_fp8``).
+``kernels/integrations/local_dit_h100._fwd`` when ``local_dit_h100.FP8_ROWS`` is set (``FOLDJET_ENGINE_ATOMDIT_FP8=1`` / ``pre`` / ``post`` at import, or ``enable_fp8``).
 """
 
 from __future__ import annotations

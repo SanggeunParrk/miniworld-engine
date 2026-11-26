@@ -6,6 +6,7 @@ contraction stored as e4m3 (``_h100_fp8``; the bf16 route is untouched).
   channel scale ``sa[c] sb[c]`` folded into the projection operand (exact, power of two) and into the LN_out statistics.
 """
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
 import torch
 
 from foldjet_engine.kernels._device import num_sms
@@ -36,10 +37,10 @@ def dynamic_scales(x, weights, token, gi, bi, h):
 import os as _os0
 
 SCALE_MODE = _os0.environ.get(
-    "MINIWORLD_TRIMUL_FP8_SCALE", "tensor"
+    "FOLDJET_ENGINE_TRIMUL_FP8_SCALE", "tensor"
 )  # "tensor" (scalar a / b scales, K3_CSCALE=2) or "channel" (K3_CSCALE=1)
 K1_F8C = (
-    _os0.environ.get("MINIWORLD_TRIMUL_FP8_K1") == "1"
+    _os0.environ.get("FOLDJET_ENGINE_TRIMUL_FP8_K1") == "1"
 )  # EXPERIMENTAL: K1 computes its projections in e4m3 too (needs SCALE_MODE tensor)
 LAST_AMAX = None  # device scalar of the last call: max |scaled plane value| (> 448 = the e4m3 cast saturated)
 
@@ -243,18 +244,18 @@ from foldjet_engine.fp8 import env as _fp8_env
 from foldjet_engine.kernels._compile import opaque
 
 POLICY = (
-    _fp8_env("MINIWORLD_TRIMUL_FP8") or None
+    _fp8_env("FOLDJET_ENGINE_TRIMUL_FP8") or None
 )  # None = off (every route is the bf16 one); "dynamic" = exact amax of the bf16 planes each call (numerics only); "calib" = static scales
 STATS: list = []  # (sa, sb, n, direction) per call when ``RECORD``
-RECORD = bool(_os.environ.get("MINIWORLD_TRIMUL_FP8_RECORD"))
+RECORD = bool(_os.environ.get("FOLDJET_ENGINE_TRIMUL_FP8_RECORD"))
 GUARD = _os.environ.get(
-    "MINIWORLD_TRIMUL_FP8_GUARD", "sync"
+    "FOLDJET_ENGINE_TRIMUL_FP8_GUARD", "sync"
 )  # "sync" (eager only) | "lazy" (no host sync: capturable) | "off". Under CUDA-graph capture the guard is always lazy.
-HEADROOM = float(_os.environ.get("MINIWORLD_TRIMUL_FP8_HEADROOM", "16"))
+HEADROOM = float(_os.environ.get("FOLDJET_ENGINE_TRIMUL_FP8_HEADROOM", "16"))
 #: smallest L the FP8 planes take, per (width, direction: 1 outgoing / 2 incoming); below it the bf16 default route runs unchanged. Measured on H100 (CUDA-graph replay of the module,
 #: same-cubin control): D128 outgoing loses 1-3 % up to L128 and wins from L144 (-5 %), D128 incoming loses 0-7 % up to L176 and wins from L192 (-8 %); D256 shows no GPU gain below
 #: L224 outgoing (+-3 %, and +15-20 us of host launch work against the default in eager mode; -6 % from L224), incoming from L144 (flat up to L128, -10 % at L144-176 where the default incoming is slower than its
-#: outgoing, flat at L192, -7 % from L224). ``MINIWORLD_TRIMUL_FP8_MINL=<n>`` replaces every gate (0 = none).
+#: outgoing, flat at L192, -7 % from L224). ``FOLDJET_ENGINE_TRIMUL_FP8_MINL=<n>`` replaces every gate (0 = none).
 #: direction 0 = bidirectional: D128 graph replay 0.95 at L256, 1.00-1.04 at L144-224; D256 1.01-1.04 up to L768, 0.975 at L1024
 #: D64 / D384 (n64 K1 blocks, 3.0.0 exploration): D64 +13.5 % at L128, -2 % at L256 (control 1.00: not clear), -10 % from L512; D384 -4 .. -8 % from L128 (graph replay, cool);
 #: bidirectional D64 +4 % at L512, L1024 -7 % cool but +8 % sustained, -22 % at L2048; bidirectional D384 -3 % at L512 (not clear), -8 % at L1024
@@ -262,14 +263,14 @@ MIN_L = {(128, 1): 144, (128, 2): 192, (256, 1): 224, (256, 2): 144, (128, 0): 2
 MIN_L.update({(64, 1): 512, (64, 2): 512, (384, 1): 128, (384, 2): 128, (64, 0): 2048, (384, 0): 1024})
 #: D512 (IntelliFold2 trunk; one direction, L % 128 == 0, packed shared-resident K1 with the e4m3 plane store + k3reorder K3_CSCALE=2): every length gains (graph replay, FP8 / default 0.76 at L128, 0.87 at L256, 0.89-0.94 at L384-L2048, control 1.00): no gate
 MIN_L.update({(512, 1): 0, (512, 2): 0})
-#: D512 (IntelliFold2 trunk) is served only inside what was measured: B = 1, L <= MAX_L_512; MINIWORLD_TRIMUL_FP8_D512=0 switches the D512 route off (every other width unchanged)
+#: D512 (IntelliFold2 trunk) is served only inside what was measured: B = 1, L <= MAX_L_512; FOLDJET_ENGINE_TRIMUL_FP8_D512=0 switches the D512 route off (every other width unchanged)
 MAX_L_512 = 2048
-D512 = _os.environ.get("MINIWORLD_TRIMUL_FP8_D512", "1") != "0"
+D512 = _os.environ.get("FOLDJET_ENGINE_TRIMUL_FP8_D512", "1") != "0"
 #: widths the route serves: D128 / D256 (n128 K1 blocks) and, from the 3.0.0 exploration (branch fp8x/trimul), D64 / D384 (n64 K1 blocks), D512 (the packed K1)
 WIDTHS = (64, 128, 256, 384, 512)
 #: samples per call the route takes (B > 1 runs the one-sample route per sample into one output; exploration, branch fp8x/trimul)
 MAX_SAMPLES = 16
-_MINL_ENV = _os.environ.get("MINIWORLD_TRIMUL_FP8_MINL")
+_MINL_ENV = _os.environ.get("FOLDJET_ENGINE_TRIMUL_FP8_MINL")
 GUARD_STATS = {"calls": 0, "retries": 0, "fallbacks": 0, "capture_fallbacks": 0}
 _CACHES: dict = {}  # calibration state per module (key: data_ptr of its to_left weight; dropped when that tensor is freed): static device tensors, so a captured graph reads them at replay
 _LAZY: dict = {}

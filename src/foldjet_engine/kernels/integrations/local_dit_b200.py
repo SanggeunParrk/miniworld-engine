@@ -36,6 +36,7 @@ import torch
 import torch.nn.functional as F
 from torch.autograd.function import once_differentiable
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
 from foldjet_engine.kernels import _capture
 from foldjet_engine.kernels._compile import device_constant, opaque
 from foldjet_engine.kernels._device import num_sms
@@ -1060,7 +1061,7 @@ def _infer(single, cond, pair, mask, weights, parallel=False, window=0):
 
 
 def _shared_cond(single, cond):
-    """B200: a conditioning that is one [1, 1, N, d] tensor expanded over the A > 1 samples (stride 0 on the sample axis: FoldForge's and
+    """B200: a conditioning that is one [1, 1, N, d] tensor expanded over the A > 1 samples (stride 0 on the sample axis: FoldJet's and
     the diffusion trainers' call) -> that [1, 1, N, d] view, so the tables are made once and their gradient is summed over the samples (autograd
     sums the expanded view's gradient back); anything else unchanged."""
     if (

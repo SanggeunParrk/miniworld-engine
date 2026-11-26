@@ -1,6 +1,6 @@
-# Paper pre-work status (engine + FoldForge, four cards), 2026-11-22 (B200 updated 2026-11-23)
+# Paper pre-work status (engine + FoldJet, four cards), 2026-11-22 (B200 updated 2026-11-23)
 
-Everything below is on `main`: engine `miniworld-engine` (this repo) and FoldForge `origin/main`. Numbers come from the CSVs; see `PAPER_DATA_SUMMARY.md` (engine, computed from `E*/E*_<card>.csv`) and the FoldForge `benchmarks/paper/F*/README.md` DATA_STATUS sections.
+Everything below is on `main`: engine `foldjet-engine` (this repo) and FoldJet `origin/main`. Numbers come from the CSVs; see `PAPER_DATA_SUMMARY.md` (engine, computed from `E*/E*_<card>.csv`) and the FoldJet `benchmarks/paper/F*/README.md` DATA_STATUS sections.
 
 ## Engine releases used by the paper
 
@@ -21,12 +21,12 @@ There is no B200 kernels wheel: B200 rows are measured on source trees (labels i
 |---|---|---|---|---|---|---|
 | H100 | done | done | done | done | done (+ ds4sci eager correction) | done |
 | A100 | done | done | done | n/a | done | done |
-| RTX 5090 | done | done | done | FP8 routes since 3.0.10 (module-level E4 not re-run; end level: F3 / F4 / F5 / F9 FP8 arms in FoldForge) | done | done |
+| RTX 5090 | done | done | done | FP8 routes since 3.0.10 (module-level E4 not re-run; end level: F3 / F4 / F5 / F9 FP8 arms in FoldJet) | done | done |
 | B200 | done | done | done | done | done (+ fp64 accuracy) | done |
 
 Timing: CUDA graph, cold L2, medians; the iteration count (100 or 20) does not change the quantity measured and is not a caveat. E5: AF3 setup (d_pair 128, 4 heads), L 512 / 1024 / 2048, inference and training, all op classes, 13 external candidates; cells without a candidate (OPM, LayerNorm) or without support are marked, not missing.
 
-## FoldForge experiments (F-series)
+## FoldJet experiments (F-series)
 
 | experiment | H100 | A100 | RTX 5090 | B200 |
 |---|---|---|---|---|
@@ -43,8 +43,8 @@ Timing: CUDA graph, cold L2, medians; the iteration count (100 or 20) does not c
 
 ### 2026-11-24 update: engine 3.0.10, FP8 arms everywhere, F4 under compile + CUDA graphs
 
-F4 now runs under compile + CUDA graphs (`scope: trunk`, as F1 / F3; FoldForge 16d094c): eager timing measured host overhead (B200 FP8 looked
-1.10-1.27x slower than bf16 eager, faster everywhere under graphs). New FoldForge data files (`*_3010*.csv`; bf16 and FP8 arms on the same engine):
+F4 now runs under compile + CUDA graphs (`scope: trunk`, as F1 / F3; FoldJet 16d094c): eager timing measured host overhead (B200 FP8 looked
+1.10-1.27x slower than bf16 eager, faster everywhere under graphs). New FoldJet data files (`*_3010*.csv`; bf16 and FP8 arms on the same engine):
 
 | card | F3 | F4 (graph) + F5 (FP8 vs bf16) | F9 |
 |---|---|---|---|
@@ -53,7 +53,7 @@ F4 now runs under compile + CUDA graphs (`scope: trunk`, as F1 / F3; FoldForge 1
 | B200 | main fixes (a888a8143 + 4915ee25a), 0.802-0.966 at n = 16 | 0.914-0.978, 21 / 21 finite (Chai-1 FP8 added after 37f357dbf) | bf16 + FP8 on the fixes, 11 predictors |
 | A100 | -- | bf16 (no FP8 on sm_80), 11 predictors, 294 / 297 ok (3 OOM under graphs); eager 3.0.6 / graph 3.0.10 1.95-4.08x | -- |
 
-FoldBench AF3 (F1 / F2) on 3.0.10 (multi mode, 2 GPUs, 1522 / 1522 both arms): GPU-h bf16 9.969 vs FP8 8.244 (0.827x); F2 top-1 bf16 / FP8 within a few points per task (antibody-antigen 48.8 / 45.8, protein-ligand 64.4 / 64.1, monomer protein lDDT 88.3 / 88.5); FoldForge 0859e57.
+FoldBench AF3 (F1 / F2) on 3.0.10 (multi mode, 2 GPUs, 1522 / 1522 both arms): GPU-h bf16 9.969 vs FP8 8.244 (0.827x); F2 top-1 bf16 / FP8 within a few points per task (antibody-antigen 48.8 / 45.8, protein-ligand 64.4 / 64.1, monomer protein lDDT 88.3 / 88.5); FoldJet 0859e57.
 
 ## Defects found by the end-to-end runs and fixed (all on `main`)
 

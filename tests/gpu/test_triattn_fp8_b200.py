@@ -278,9 +278,9 @@ def test_shipped_gates() -> None:
     """The gates as shipped (measured, docs/b200/fp8.md 8.3): S >= 1024 for the head-dim-32 kinds; the 64-channel-head core is built but its gate is closed (module x1.04-1.12)."""
     import os
 
-    if "MINIWORLD_TRIATTN_B200_FP8_MINS" not in os.environ:
+    if "FOLDJET_ENGINE_TRIATTN_B200_FP8_MINS" not in os.environ:
         assert _SHIPPED_GATES[0] == 1024
-    if "MINIWORLD_TRIATTN_B200_FP8_MINS64" not in os.environ:
+    if "FOLDJET_ENGINE_TRIATTN_B200_FP8_MINS64" not in os.environ:
         assert _SHIPPED_GATES[1] >= 1 << 30
 
 

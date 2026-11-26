@@ -28,7 +28,7 @@ from foldjet_engine.kernels.integrations import local_dit as _ld
 
 #: EXPERIMENTAL, opt-in (default off): the bf16 inference forward runs row-kernel GEMMs on e4m3 wgmma (``sm90_atom.f8``). The kernels it covers:
 #: ``"pre"`` (q | gate | k | v projections, pre90_f8) and / or ``"post"`` (out-projection, SwiGLU, squeeze, post90_f8). Set by
-#: ``MINIWORLD_ATOMDIT_FP8`` at import (``1`` / ``all``: both; ``pre``; ``post``) or ``enable_fp8()``. Training, fp32 and the options outside
+#: ``FOLDJET_ENGINE_ATOMDIT_FP8`` at import (``1`` / ``all``: both; ``pre``; ``post``) or ``enable_fp8()``. Training, fp32 and the options outside
 #: ``sm90_atom.f8.OPTIONS`` keep the bf16 / TF32 kernels. docs/fp8.md, "Atom DiT".
 _FP8_PARTS = ("pre", "post")
 
@@ -44,7 +44,7 @@ def _fp8_parts(value: bool | str | Iterable[str] | None) -> frozenset:
     return parts
 
 
-FP8_ROWS: frozenset = _fp8_parts(_fp8_env("MINIWORLD_ATOMDIT_FP8", ""))
+FP8_ROWS: frozenset = _fp8_parts(_fp8_env("FOLDJET_ENGINE_ATOMDIT_FP8", ""))
 #: Route call counters (``foldjet_engine.fp8.route_stats()``; plain ints at Python call time, never inside a kernel or graph replay):
 #: ``calls`` = forward calls that took the e4m3 row kernels, ``pre`` / ``post`` = of those, per part; ``fallbacks`` = calls the route is on for
 #: (``FP8_ROWS`` set) that ran bf16 instead, with the first failing gate counted in ``why_save`` (training forward) / ``why_tf32`` / ``why_opts``
@@ -546,7 +546,7 @@ def _bwd(
     dev = single.device
     # autocast off: a ``.backward()`` called inside an autocast region runs this under the caller's autocast state (autograd carries it to
     # the backward), and autocast would make the weight-gradient GEMMs below (``_mmT``, ``_cond_bwd_shared``) bf16 -- finalize90 reads
-    # them as fp32 [rows, 128]: out of bounds (FoldForge R20: CUDA_ERROR_ILLEGAL_ADDRESS in finalize, Protenix v1 training step)
+    # them as fp32 [rows, 128]: out of bounds (FoldJet R20: CUDA_ERROR_ILLEGAL_ADDRESS in finalize, Protenix v1 training step)
     with torch.cuda.device(dev), torch.autocast("cuda", enabled=False):
         s2 = _ld._padded(single, n).reshape(m, DS).contiguous()
         shared = _shared(cond)

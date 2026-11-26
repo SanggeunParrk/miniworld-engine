@@ -1,4 +1,4 @@
-"""R17 (FoldForge): ``PoolAtoms`` trains -- the kernels' backward (cuda: H100 sm_90a / A100 sm_80; triton) equals the gradient of the reference
+"""R17 (FoldJet): ``PoolAtoms`` trains -- the kernels' backward (cuda: H100 sm_90a / A100 sm_80; triton) equals the gradient of the reference
 statement in float64 up to bf16 rounding, is bitwise reproducible (no atomics, although random atom indices repeat), and a mask that requires
 grad is refused."""
 

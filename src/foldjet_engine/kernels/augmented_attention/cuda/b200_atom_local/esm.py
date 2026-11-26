@@ -13,6 +13,8 @@ wrappers (dc425caa5), B200 halves only. ``kernels/integrations/local_dit_esm_b20
 
 from __future__ import annotations
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
+
 import functools
 
 import torch

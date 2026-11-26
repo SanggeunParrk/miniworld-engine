@@ -3,14 +3,14 @@
 Only a BUILD needs them -- an artifact found prebuilt or cached loads without -- so nothing here runs, and nothing is
 downloaded, unless a kernel has to be compiled on this machine. Where a library's headers are taken from, first hit wins:
 
-1. the environment variable(s) (``CUTLASS_PATH`` = a CUTLASS checkout; ``MINIWORLD_MATHDX_HOME`` / ``MATHDX_HOME`` /
+1. the environment variable(s) (``CUTLASS_PATH`` = a CUTLASS checkout; ``FOLDJET_ENGINE_MATHDX_HOME`` / ``MATHDX_HOME`` /
    ``NVIDIA_MATHDX_HOME`` = a mathdx root) -- resolved by ``_nvcc``, unchanged;
 2. the pinned PyPI distribution, when it is installed in this environment at exactly the pinned version
    (``pip install --no-deps nvidia-cutlass==4.2.0.0`` / ``nvidia-mathdx==25.6.0``);
-3. the header cache, ``$MINIWORLD_ENGINE_HEADER_CACHE`` (else ``$XDG_CACHE_HOME`` or ``~/.cache``, ``/miniworld_engine_headers``),
+3. the header cache, ``$FOLDJET_ENGINE_HEADER_CACHE`` (else ``$XDG_CACHE_HOME`` or ``~/.cache``, ``/foldjet_engine_headers``),
    filled on the first build that needs it by downloading that same wheel from PyPI, checking its SHA-256 and unpacking only
    the header tree (``python -m foldjet_engine.kernels._headers fetch`` does it ahead of time, e.g. on a node with network
-   access, or ``--wheel FILE`` from a wheel downloaded elsewhere; ``MINIWORLD_ENGINE_NO_DOWNLOAD=1`` forbids the download).
+   access, or ``--wheel FILE`` from a wheel downloaded elsewhere; ``FOLDJET_ENGINE_NO_DOWNLOAD=1`` forbids the download).
 
 Why the wheels and not a dependency: ``nvidia-cutlass`` 4.2.0.0 ships the complete ``include/`` tree of the CUTLASS v4.2.0 release
 (byte-identical to the v4.2.0 git tag the prebuilt artifacts were built with), but it also depends on ``cuda-python>=11.8``, whose
@@ -33,6 +33,8 @@ import sys
 import urllib.request
 import zipfile
 from pathlib import Path
+
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -83,8 +85,8 @@ MATHDX = HeaderPackage(
 
 PACKAGES = {p.name: p for p in (CUTLASS, MATHDX)}
 
-CACHE_ENV = "MINIWORLD_ENGINE_HEADER_CACHE"
-NO_DOWNLOAD_ENV = "MINIWORLD_ENGINE_NO_DOWNLOAD"
+CACHE_ENV = "FOLDJET_ENGINE_HEADER_CACHE"
+NO_DOWNLOAD_ENV = "FOLDJET_ENGINE_NO_DOWNLOAD"
 _COMPLETE = ".complete"
 
 
@@ -97,7 +99,9 @@ def cache_root() -> Path:
     if forced:
         return Path(forced).expanduser()
     xdg = os.environ.get("XDG_CACHE_HOME")
-    return (Path(xdg).expanduser() if xdg else Path.home() / ".cache") / "miniworld_engine_headers"
+    base = Path(xdg).expanduser() if xdg else Path.home() / ".cache"
+    new, old = base / "foldjet_engine_headers", base / "miniworld_engine_headers"  # the pre-1.0.0 name while no new one exists
+    return old if old.is_dir() and not new.exists() else new
 
 
 def _installed(pkg: HeaderPackage) -> Path | None:

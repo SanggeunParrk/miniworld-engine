@@ -7,6 +7,8 @@ is byte-identical)."""
 
 from __future__ import annotations
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
+
 import os
 
 import torch
@@ -24,9 +26,9 @@ def _device_is_sm120() -> bool | None:
 
 
 def sm120_build() -> bool:
-    """The build targets the 5090: ``MINIWORLD_ENGINE_BUILD_ARCH`` says so (the shared switch of every sm_80 builder, ``kernels/_sm120.py``; a
+    """The build targets the 5090: ``FOLDJET_ENGINE_BUILD_ARCH`` says so (the shared switch of every sm_80 builder, ``kernels/_sm120.py``; a
     GPU-less prebuild of ``_prebuild --arch sm120`` sets it), else the current device is one, or (no GPU) ``TORCH_CUDA_ARCH_LIST`` names 12.0 only."""
-    forced = os.environ.get("MINIWORLD_ENGINE_BUILD_ARCH", "").lower().removeprefix("sm").removeprefix("_").rstrip("a")
+    forced = os.environ.get("FOLDJET_ENGINE_BUILD_ARCH", "").lower().removeprefix("sm").removeprefix("_").rstrip("a")
     if forced:
         return forced == "120"
     dev = _device_is_sm120()

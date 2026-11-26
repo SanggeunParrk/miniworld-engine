@@ -1,6 +1,6 @@
-"""``AtomDiTESMFold2Pair`` (FoldForge R6): ESMFold2's atom block with the atom pair against its own definition, written per query window.
+"""``AtomDiTESMFold2Pair`` (FoldJet R6): ESMFold2's atom block with the atom pair against its own definition, written per query window.
 
-ESMFold2 (FoldForge ``spec.ESMFOLD2``) is AlphaFold 3's atom block -- parallel K / V AdaLN, slid key window -- with a 192-key subset
+ESMFold2 (FoldJet ``spec.ESMFOLD2``) is AlphaFold 3's atom block -- parallel K / V AdaLN, slid key window -- with a 192-key subset
 (``AtomCrossAtt.compute_features(keys_subset_size=192)``), a +/- 64 window by rank among the real atoms, AdaLNs of the form
 ``(1 + W_s silu(c)) * rms(x) + W_b silu(c)``, raw output gates ``W silu(c)``, and q / k through an affine-free RMSNorm per head and a
 half-split rotary from per-atom tables. The reference below spells each of those out from the definition (``esm_block``), with the window
@@ -69,7 +69,7 @@ def adaln(x, c, w_scale, w_bias):
     return (c @ w_scale.T + 1) * rms(x) + c @ w_bias.T
 
 
-def rotate(x, cos, sin):  # x [..., 32], cos / sin [..., 16]: channel i pairs with i + 16 (FoldForge's tiled tables)
+def rotate(x, cos, sin):  # x [..., 32], cos / sin [..., 16]: channel i pairs with i + 16 (FoldJet's tiled tables)
     a, b = x[..., :16], x[..., 16:]
     return torch.cat([a * cos - b * sin, b * cos + a * sin], -1)
 
@@ -127,7 +127,7 @@ def test_the_window_rule_is_the_af3_one_at_192_keys():
 
 
 def test_the_parameter_layout():
-    """FoldForge's ESMFold2 atom block: no conditioning LayerNorm, no scale / gate biases, an affine-free q / k norm; the query bias kept."""
+    """FoldJet's ESMFold2 atom block: no conditioning LayerNorm, no scale / gate biases, an affine-free q / k norm; the query bias kept."""
     names = {name for name, _ in AtomDiTESMFold2Pair().named_parameters()}
     assert names == {
         "attention.ada_ln_in.to_scale.weight",

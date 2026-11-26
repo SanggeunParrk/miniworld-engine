@@ -362,7 +362,7 @@ def _ext(
         key += "_epi_tma_overlap"
     if epi_half:
         key += "_half"
-    if fused and not sm100 and not wide:  # the fused outer product + projection kernel (csrc/opm_epilogue.cu, MINIWORLD_OPM_FUSED)
+    if fused and not sm100 and not wide:  # the fused outer product + projection kernel (csrc/opm_epilogue.cu, FOLDJET_ENGINE_OPM_FUSED)
         key += "_fused"
     if fp8 and not sm100:
         key += "_fp8"
@@ -1093,7 +1093,7 @@ def outer_product_mean(
     ]
     if torch.is_grad_enabled():
         save_o = True
-        # EXPERIMENTAL opt-in (MINIWORLD_OPM_FP8_TRAIN / MINIWORLD_FP8_TRAIN): FP8 products in forward and backward; off by default
+        # EXPERIMENTAL opt-in (FOLDJET_ENGINE_OPM_FP8_TRAIN / FOLDJET_ENGINE_FP8_TRAIN): FP8 products in forward and backward; off by default
         from foldjet_engine.kernels.integrations import opm_fp8_train
 
         if opm_fp8_train.MODE is not None and opm_fp8_train.serves(msa, msa.shape[3], cz):
@@ -1268,7 +1268,7 @@ def _inference_op(args: list[torch.Tensor], eps: float, after: bool, dmin: float
             residual=args[8] if args[8].numel() else None,
             save_stats=False,
         )[0]
-    # EXPERIMENTAL opt-in (MINIWORLD_OPM_FP8): e4m3 grouped product; off by default
+    # EXPERIMENTAL opt-in (FOLDJET_ENGINE_OPM_FP8): e4m3 grouped product; off by default
     from foldjet_engine.kernels.integrations import opm_fp8
 
     if opm_fp8.serves(args):

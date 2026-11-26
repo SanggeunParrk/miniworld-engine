@@ -7,7 +7,7 @@ fwd / bwd, FFN fwd / bwd for small row counts). The two engine sources use mma.s
 Moved from team-gm ``swa_fused_triton._cuda_ext`` (commit 14f2c73). Same sources, same nvcc flags (``-O3``,
 ``-gencode=arch=compute_90a,code=sm_90a``, ``--use_fast_math``); what changed is where and how they build:
 
-* under ``$settings.engine_jit_root/<extension>`` (default ``~/.cache/miniworld_engine_jit``), one directory per
+* under ``$settings.engine_jit_root/<extension>`` (default ``~/.cache/foldjet_engine_jit``), one directory per
   extension, instead of torch's extension cache or team-gm's ``SWA_CUDA_BUILD``. Set the root per checkout/GPU so
   concurrent builds do not collide;
 * through ``kernels._nvcc.load_extension``, which reclaims a lock left by a killed build (NFS-safe: it trusts the

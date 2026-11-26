@@ -3,19 +3,19 @@
 This section is the final state after merging agents D (TriAttn), E (atom DiT + token DiT remainder), F (Transition D128 / D256 / wide) and G (OPM / PWA / TriMul remainder) on top of the
 3.0.3 + B200 base (branch b200/3.0.3). The per-agent sections below keep the full measurements; where an earlier sentence says "declined" for Transition D128 / D256 it is SUPERSEDED by section 8
 of the Transition part (agent F built the fused e4m3 forward). Everything is opt-in, default OFF (bf16 default routes are bit-identical with FP8 off, see Verification).
-Switch: `MINIWORLD_FP8=safe` (or `fp8.enable("safe", model=...)`, backend `engine-fp8`); every route also has its own variable, an explicitly set variable wins over the preset.
+Switch: `FOLDJET_ENGINE_FP8=safe` (or `fp8.enable("safe", model=...)`, backend `engine-fp8`); every route also has its own variable, an explicitly set variable wins over the preset.
 
 ## Served routes (capability (10, 0); ratio = e4m3 / bf16 default route, module level, graph replay; < 1 is faster)
 
 | slot | route (module) | served when (gates) | time ratio (gap / sustained) | energy | accuracy vs default (max rel diff, mixed workload run) | switch / registration |
 |---|---|---|---|---|---|---|
-| trimul | `trimul_inproj.cuda.b200_fp8` planes e4m3 | D 64-512, L >= MIN_L ((128,out/in) 512, (128,bidir) 384 [G, quiet GPU], (384,out/in) 256, (384,bidir) 128 [G], D256 out/in 384 / bidir 256, D512 128, D64 out/in 512 / bidir 384); RF3 (D <= 128, B 1) L >= `MIN_L_RF3` {64: 1280, 128: 1024} [G]; L/ceil128(L) >= 0.9 | D128 out L2048 0.85 / 0.85; L1024 0.94 / 0.92; bidir L2048 0.84 | 0.80-0.90 | 0.025-0.027 | `MINIWORLD_TRIMUL_FP8=calib`; `B200_ROUTES["trimul"]` |
-| triattn | `triangle_attention.cuda.b200_fp8` e4m3 P and V (tcgen05 f8f6f4) | head dim 32 sites (fused d_pair 128; unfused 64 / 256 / 384), padded S >= 1024 (`MINIWORLD_TRIATTN_B200_FP8_MINS`), HB build, model in `TRIATTN_MODELS`; 64-channel core built, gate closed; e4m3 q / k (front-written rows) from S >= 1024 for the models whose whitelist lists qk (D.7) | L1024 1.013 / 0.973; L2048 0.957 / 0.908 | 0.97 (L1024), 0.90 (L2048) | 0.005 | `enable_triattn` via `MINIWORLD_FP8_MODEL` (h100_sm90 switches); `B200_ROUTES["triattn"]` (registered in this integration) |
-| transition | `transition.cuda.fp8_sm100a` (chain 3 launches; fused one-kernel forward for D128 and D256 n4 >= 12288 rows) | `ROW_GATE` {(128,4) 147456 (< 1179648), (128,2) 65536 (< 1474560) [2026-11-23 re-measure, see `fp8_sm100a.py`], (256,4) 1024, (256,2) 1024 (< 8192), (512,4) 1024, (512,2) 4096, (768,4) 4096, (768,2) 4096} [F re-measured D512 / D768 on a quiet GPU]; `WIDTHS` default 128,256,512,768 (F); D384 / D64 / D1024 unserved | D512 n4 65536 rows 0.78; D768 n4 0.63; D128 n4 65536 0.97-0.99 gap, 0.85-0.95 sustained | D128 0.79-0.86; D512/768 0.5-0.8 | 0.033-0.040 | `MINIWORLD_TRANSITION_FP8=calib` (+ `_WIDTHS`, `_FUSED`, `_PAIRB`); `B200_ROUTES["transition"]` |
-| token_dit | `conditioned_transition.cuda.token_dit_fp8(_b200)` e4m3 expand + SwiGLU (plain, Boltz-2 up gate [E], RF3 parallel non-identity [E]) | placement `expand`; rows >= gate (Protenix / Chai-1 plain, Boltz-2 up `MIN_ROWS_B200_UP` 1280, RF3 `MIN_ROWS_B200_RF3` 2560); qkvg / out / squeeze not served (measured 0.99-1.05) | block 0.94-0.97 at M 2560; Boltz-2 0.89-0.96 from 1280; RF3 0.95-0.99 from 2560 | 0.91-0.96 | 0.031-0.047 | `MINIWORLD_TOKEN_DIT_FP8=expand`; `_B200_UP`, `_B200_RF3` default on; weight forms are cached only under `static_weights()` (see caveat) |
-| opm | `integrations.opm_fp8_b200` e4m3 product (wide prologue, fused S <= 512 [G], Chai-1 grouped [G]) | `_gate`: padded S gate / wide builds from padded S 256; fused padded S >= 256; Chai-1 (N >= 384 and S >= 1024) or (N >= 256 and S >= 2048) or (N >= 768 and S >= 512) | 64/128 L384 S2048 0.635; 128/256 0.66; fused S256-512 0.78-0.95; Chai-1 0.62-0.90 | ~0.6-0.9 | 0.010 | `MINIWORLD_OPM_FP8=bound` (H100-named module, B200 branch inside `opm_sm100`) |
-| pwa | `integrations.pwa_fp8_b200` e4m3 contraction (narrow, wide + BIG [G], dual [G], `pwa8_forward` one launch [G]) | padded N^2 S >= 2.4e9 (8x8), 1.1e9 (8x16), 6e8 (8x32 / BIG) | 8x32 N1536 S512 0.79 (d_pair 256 N1536: 0.73) | 0.8-0.9 | 0.0055 | `MINIWORLD_PWA_FP8=1` |
-| atom_dit | `augmented_attention.cuda.b200_atom.f8` rows route (pre + post) | rows <= 10240 (2048 atoms x 5) | 0.93-0.99 at 1024 atoms x 5, 1.00 at 2048 x 5, 1.02-1.06 above | -4 .. -9 % per block | update error 5.5 % rms (6x the bf16 route; outside the judge) | NOT in `safe` (effect on the whole model <= 0.3 %, E's decision): `MINIWORLD_ATOMDIT_FP8_B200` (1 / all / pre / post), `fp8.B200_OPTIN["atom_dit"]` |
+| trimul | `trimul_inproj.cuda.b200_fp8` planes e4m3 | D 64-512, L >= MIN_L ((128,out/in) 512, (128,bidir) 384 [G, quiet GPU], (384,out/in) 256, (384,bidir) 128 [G], D256 out/in 384 / bidir 256, D512 128, D64 out/in 512 / bidir 384); RF3 (D <= 128, B 1) L >= `MIN_L_RF3` {64: 1280, 128: 1024} [G]; L/ceil128(L) >= 0.9 | D128 out L2048 0.85 / 0.85; L1024 0.94 / 0.92; bidir L2048 0.84 | 0.80-0.90 | 0.025-0.027 | `FOLDJET_ENGINE_TRIMUL_FP8=calib`; `B200_ROUTES["trimul"]` |
+| triattn | `triangle_attention.cuda.b200_fp8` e4m3 P and V (tcgen05 f8f6f4) | head dim 32 sites (fused d_pair 128; unfused 64 / 256 / 384), padded S >= 1024 (`FOLDJET_ENGINE_TRIATTN_B200_FP8_MINS`), HB build, model in `TRIATTN_MODELS`; 64-channel core built, gate closed; e4m3 q / k (front-written rows) from S >= 1024 for the models whose whitelist lists qk (D.7) | L1024 1.013 / 0.973; L2048 0.957 / 0.908 | 0.97 (L1024), 0.90 (L2048) | 0.005 | `enable_triattn` via `FOLDJET_ENGINE_FP8_MODEL` (h100_sm90 switches); `B200_ROUTES["triattn"]` (registered in this integration) |
+| transition | `transition.cuda.fp8_sm100a` (chain 3 launches; fused one-kernel forward for D128 and D256 n4 >= 12288 rows) | `ROW_GATE` {(128,4) 147456 (< 1179648), (128,2) 65536 (< 1474560) [2026-11-23 re-measure, see `fp8_sm100a.py`], (256,4) 1024, (256,2) 1024 (< 8192), (512,4) 1024, (512,2) 4096, (768,4) 4096, (768,2) 4096} [F re-measured D512 / D768 on a quiet GPU]; `WIDTHS` default 128,256,512,768 (F); D384 / D64 / D1024 unserved | D512 n4 65536 rows 0.78; D768 n4 0.63; D128 n4 65536 0.97-0.99 gap, 0.85-0.95 sustained | D128 0.79-0.86; D512/768 0.5-0.8 | 0.033-0.040 | `FOLDJET_ENGINE_TRANSITION_FP8=calib` (+ `_WIDTHS`, `_FUSED`, `_PAIRB`); `B200_ROUTES["transition"]` |
+| token_dit | `conditioned_transition.cuda.token_dit_fp8(_b200)` e4m3 expand + SwiGLU (plain, Boltz-2 up gate [E], RF3 parallel non-identity [E]) | placement `expand`; rows >= gate (Protenix / Chai-1 plain, Boltz-2 up `MIN_ROWS_B200_UP` 1280, RF3 `MIN_ROWS_B200_RF3` 2560); qkvg / out / squeeze not served (measured 0.99-1.05) | block 0.94-0.97 at M 2560; Boltz-2 0.89-0.96 from 1280; RF3 0.95-0.99 from 2560 | 0.91-0.96 | 0.031-0.047 | `FOLDJET_ENGINE_TOKEN_DIT_FP8=expand`; `_B200_UP`, `_B200_RF3` default on; weight forms are cached only under `static_weights()` (see caveat) |
+| opm | `integrations.opm_fp8_b200` e4m3 product (wide prologue, fused S <= 512 [G], Chai-1 grouped [G]) | `_gate`: padded S gate / wide builds from padded S 256; fused padded S >= 256; Chai-1 (N >= 384 and S >= 1024) or (N >= 256 and S >= 2048) or (N >= 768 and S >= 512) | 64/128 L384 S2048 0.635; 128/256 0.66; fused S256-512 0.78-0.95; Chai-1 0.62-0.90 | ~0.6-0.9 | 0.010 | `FOLDJET_ENGINE_OPM_FP8=bound` (H100-named module, B200 branch inside `opm_sm100`) |
+| pwa | `integrations.pwa_fp8_b200` e4m3 contraction (narrow, wide + BIG [G], dual [G], `pwa8_forward` one launch [G]) | padded N^2 S >= 2.4e9 (8x8), 1.1e9 (8x16), 6e8 (8x32 / BIG) | 8x32 N1536 S512 0.79 (d_pair 256 N1536: 0.73) | 0.8-0.9 | 0.0055 | `FOLDJET_ENGINE_PWA_FP8=1` |
+| atom_dit | `augmented_attention.cuda.b200_atom.f8` rows route (pre + post) | rows <= 10240 (2048 atoms x 5) | 0.93-0.99 at 1024 atoms x 5, 1.00 at 2048 x 5, 1.02-1.06 above | -4 .. -9 % per block | update error 5.5 % rms (6x the bf16 route; outside the judge) | NOT in `safe` (effect on the whole model <= 0.3 %, E's decision): `FOLDJET_ENGINE_ATOMDIT_FP8_B200` (1 / all / pre / post), `fp8.B200_OPTIN["atom_dit"]` |
 
 Framework (`src/foldjet_engine/fp8.py`, this integration): `B200_ROUTES` = trimul, triattn, transition (slot replacement: `_modules()` returns the B200 module on capability (10, 0)); `B200_OPTIN` = atom_dit (opt-in, own
 variable, not in a preset; `serves_sm100("atom_dit")` True; `enable()` / `disable()` / `status()` / `route_stats()["atom_dit"]` follow `b200_atom.f8` on a B200: `ENABLED` stages and `{pre, post, pre_declined, post_declined}`);
@@ -37,8 +37,8 @@ Caveats found in the integration: (1) token DiT e4m3 weight forms are rebuilt pe
 
 ## End-to-end measurement on engine main (2026-11-23)
 
-5I28, FoldForge F3 protocol (real MSA + 4 templates, 4 trunk passes, 200 steps, 5 samples, bf16, compile + CUDA graphs, steady median), real
-weights, engine main 1ac962f49 / a553001e1, `MINIWORLD_FP8=safe` + `MINIWORLD_FP8_MODEL=<predictor>`; rented B200 (AF3, Protenix v1 n <= 4) and
+5I28, FoldJet F3 protocol (real MSA + 4 templates, 4 trunk passes, 200 steps, 5 samples, bf16, compile + CUDA graphs, steady median), real
+weights, engine main 1ac962f49 / a553001e1, `FOLDJET_ENGINE_FP8=safe` + `FOLDJET_ENGINE_FP8_MODEL=<predictor>`; rented B200 (AF3, Protenix v1 n <= 4) and
 the shared B200 host (the rest). Ratio = FP8 / bf16 steady time (< 1 is faster). `fp8.check()` was False in every cell.
 
 | predictor | n = 1 | n = 4 | n = 8 | n = 16 |
@@ -59,7 +59,7 @@ the shared B200 host (the rest). Ratio = FP8 / bf16 steady time (< 1 is faster).
 - **Chai-1 n = 8 FP8: non-finite coordinates** (FloatingPointError in decode) with `fp8.check()` False, also with CUDA graphs off; bf16 n = 8 and
   FP8 n = 16 are finite. Re-checked on engine main a553001e1 (after the token DiT e4m3 scale floor a8ddeaac5): still non-finite (bf16 n = 8
   ok, 3.43 s). Not localized (the minus-TriAttn / -PWA / -TriMul / -token-DiT variants were not run: the shared host's GPUs were taken).
-  **Blocked in code**: `fp8.B200_BLOCKED_MODELS` = {chai1}: on a B200 `MINIWORLD_FP8` reads as off and `fp8.enable()` acts as `disable()` for
+  **Blocked in code**: `fp8.B200_BLOCKED_MODELS` = {chai1}: on a B200 `FOLDJET_ENGINE_FP8` reads as off and `fp8.enable()` acts as `disable()` for
   Chai-1 (tests/cpu/test_fp8_b200_blocked_models.py). Remove the entry only after an end-level check on the B200.
   **Unblocked 2026-11-24 (37f357dbf)**: with the PWA e4m3 route off (below) Chai-1 n = 8 FP8 is finite (3.34 s, bf16 3.43 s).
 
@@ -68,11 +68,11 @@ the shared B200 host (the rest). Ratio = FP8 / bf16 steady time (< 1 is faster).
 - **RoseTTAFold3 5I28 n = 12 / 16 FP8 non-finite** (F3, compile + CUDA graphs, one size per process). Route isolation at n = 12, one process per
   variant: every route alone finite except **PWA e4m3 alone -> non-finite**; `safe` without PWA finite (4.92 s, bf16 5.48 s); all routes off with
   the FP8 arm finite. A hook on `pwa_fp8_b200` saw the eager calls in range (max |v8| 20 of 448, no NaN in v8 / o): the fault is in the captured
-  replay, not localized. Fix (a888a8143): the B200 PWA e4m3 route serves only with `MINIWORLD_PWA_FP8_B200=1` (on top of `safe`); its v-scale cache
+  replay, not localized. Fix (a888a8143): the B200 PWA e4m3 route serves only with `FOLDJET_ENGINE_PWA_FP8_B200=1` (on top of `safe`); its v-scale cache
   is keyed on the weights' versions / shapes (was the wv pointer alone; not the cause: forced on with the new key it is still non-finite).
-- **bf16 non-finite with several shapes' sampler graphs in one process** (FoldForge F4 under compile + CUDA graphs: AF3 bf16 9 / 27 targets).
-  Execution bisect (12 targets): FoldForge's per-shape sampler-graph cache off -> finite; compile alone, trunk graphs alone -> finite. Engine
-  switch bisect: `MINIWORLD_TOKEN_B200_STREAMS=0` or `_BF16_FORK=0` -> 12 / 12 finite; PAR / FOLDS / FINAL / GEARLY / the atom DiT early bias
+- **bf16 non-finite with several shapes' sampler graphs in one process** (FoldJet F4 under compile + CUDA graphs: AF3 bf16 9 / 27 targets).
+  Execution bisect (12 targets): FoldJet's per-shape sampler-graph cache off -> finite; compile alone, trunk graphs alone -> finite. Engine
+  switch bisect: `FOLDJET_ENGINE_TOKEN_B200_STREAMS=0` or `_BF16_FORK=0` -> 12 / 12 finite; PAR / FOLDS / FINAL / GEARLY / the atom DiT early bias
   -> still non-finite; keeping the token packs per capture -> still non-finite; recording the side-stream outputs (bias table, gates) on the caller's
   stream -> still non-finite. Fix (4915ee25a): the bf16 fork of the pair pass off by default (same kernels in program order, outputs unchanged;
   the fork had been 1-8 % faster at L 128-512); TokenDiT* `cuda:b200_sm100` 25 -> 26 (900d8d355). fp32 keeps its fork (not seen failing).
@@ -85,7 +85,7 @@ the shared B200 host (the rest). Ratio = FP8 / bf16 steady time (< 1 is faster).
 ## Verification of the combined tree (n14-all)
 FP8-off bit identity against n14-base, eager and graph, sha1, separate processes: token DiT + APB 398 / 398 (eager and graph), atom DiT 258 / 258 eager and 258 graph (4 float32 L4096 cases are nondeterministic in the base itself), OPM + PWA 174 / 174 (both), TriMul 24 / 24 (eager + graph, max abs 0),
 Transition 23 shapes (all inference shas equal; the last parameter-gradient hash of each training case differs between two runs of the BASE as well), TriAttn 90 cases eager + graph 0 differ.
-Tests: tests/gpu 831 passed, tests/cpu 3500 passed (GPU visible). `MINIWORLD_FP8=safe` end to end (one process, one captured graph, 14 module workloads): all routes counted, `check()` False, graph == eager bytes, `disable()` returns bf16 bit identity.
+Tests: tests/gpu 831 passed, tests/cpu 3500 passed (GPU visible). `FOLDJET_ENGINE_FP8=safe` end to end (one process, one captured graph, 14 module workloads): all routes counted, `check()` False, graph == eager bytes, `disable()` returns bf16 bit identity.
 Prebuild sm100: 835 artifacts, 0 not built.
 
 
@@ -105,14 +105,14 @@ in their trees; the shared facts are in section 2 and `work/n13-fp8-a/mb_results
   (sustained time and energy x0.47-0.88; D 768 n 4 x0.63, D 512 n 4 x0.77 at large M) and, with the fused one-kernel e4m3 forward of section 8, at **D 128 / 256** too (D 128 n 4 sustained x0.85-0.95 and energy x0.79-0.86 from 65536 rows, x1.00 / energy x0.92 at 4096; D 256 n 4 x0.83-0.92 from 12288 rows and x0.54-0.85 below it on the chain; D 256 n 2 x0.78 below 8192 rows); **D 384 stays unserved** (chain x1.00-1.07 at >= 65536 rows, section 8.5).
 * Accuracy = the H100 FP8 band (judge error 0.034-0.039 against fp64 at x ~ N(0,1), update rms 6.6 %), no NaN, saturation handled by the 3.0.3 guard (sync redo / lazy +
   `fp8.check()`, also through captured graphs).
-* Framework: `fp8.py` serves capability (10, 0) for the slots in `fp8.B200_ROUTES` (Transition now); `MINIWORLD_FP8=safe` / `engine-fp8` turn the route on on a B200.
+* Framework: `fp8.py` serves capability (10, 0) for the slots in `fp8.B200_ROUTES` (Transition now); `FOLDJET_ENGINE_FP8=safe` / `engine-fp8` turn the route on on a B200.
 
 ## 1. H100 design digest (what 3.0.3 does and what transfers)
 
 ### 1.1 Framework (`src/foldjet_engine/fp8.py`, 3.0.3)
 * `PRESETS["safe"]` maps per-route env names to values (TRIMUL=calib, OPM=bound, PWA=1, TRANSITION=calib, TOKEN_DIT=expand, ATOMDIT=1; TriAttn per validated model).
-  `MINIWORLD_FP8=safe` selects it; `env(name, default)`: a variable present in `os.environ` (even `""` = off) wins, else the preset value, else `default`. Route modules read it **at import**
-  (`POLICY = fp8.env("MINIWORLD_X_FP8") or None`); `enable()` / `disable()` set the module attributes at run time.
+  `FOLDJET_ENGINE_FP8=safe` selects it; `env(name, default)`: a variable present in `os.environ` (even `""` = off) wins, else the preset value, else `default`. Route modules read it **at import**
+  (`POLICY = fp8.env("FOLDJET_ENGINE_X_FP8") or None`); `enable()` / `disable()` set the module attributes at run time.
 * `engine-fp8` backend: `resolve_backend` -> (`cuda`, FP8 on); `set_backend` installs a `_forward_cuda` wrapped in `BackendScope(on=True)` which `enable("safe")`s for the call and restores the
   switches on exit (stack `SCOPES`, `_BASE`); training (module.training or autograd enabled) never opens the scope. Every route's `serves()` was H100-only (`capability == (9, 0)`).
 * `route_stats()` / `reset_route_stats()`: per-route plain-int counters bumped at Python call time (a graph replay does not recount). Transition keys: `calls retries fallbacks capture_fallbacks calibrations`.
@@ -142,7 +142,7 @@ in their trees; the shared facts are in section 2 and `work/n13-fp8-a/mb_results
 |---|---|
 | quantization recipe: LayerNorm-bound xn scale, per-tensor pow2 weight scales shared by Wa / Wb, static calibrated h scale with headroom 16 | MMA `kind::f8f6f4`, instruction descriptor, K = 32 per MMA |
 | pack once per weight version, cache keyed by (data_ptr, `_version`), calibrate on the first eager call, capture fallback | smem layout (128 e4m3 per 128-B swizzle row, no K permutation: the H100's `_perm_k` was a wgmma register-fragment trick) |
-| guard protocol (`sync` / `lazy`, `overflow_peak`, `rescale_all`, `fp8.check()`), route stats keys, `MINIWORLD_TRANSITION_FP8*` switches | epilogue (TMEM -> registers, scales, satfinite cast, st.global), pipelining (TMA ring, TMEM double buffer, PDL chain) |
+| guard protocol (`sync` / `lazy`, `overflow_peak`, `rescale_all`, `fp8.check()`), route stats keys, `FOLDJET_ENGINE_TRANSITION_FP8*` switches | epilogue (TMEM -> registers, scales, satfinite cast, st.global), pipelining (TMA ring, TMEM double buffer, PDL chain) |
 | tanh silu | tile shapes (128 x BN, BN 128 / 192 / 256), launch structure (3 launches instead of one fused kernel) |
 | acceptance: fp64 gold, judge band 0.02-0.045, no NaN | gates: re-measured against the B200 default route (v66), not carried over |
 Deviations from the H100 recipe (each with a measured reason): the scale floor `AMAX_FLOOR = 1e-12` instead of `1e-30` (so that `1/(sx s1)` stays finite in fp32 for tiny gamma / weights),
@@ -180,13 +180,13 @@ reference of the same e4m3 inputs 2.4e-3 (the bf16 output rounding).
 * `B200_ROUTES: {slot: module path}` (Transition: `kernels/transition/cuda/fp8_sm100a`); `SLOTS`; `arch()` ("sm100" on a B200); `serves_sm100(slot)`. `_modules()` is cached per arch and returns the B200 module in
   the slot's place on a B200, the H100 module otherwise (so `enable` / `disable` / `status` / `check` / `route_stats` / `BackendScope` need no other change). A slot without an entry keeps the H100 module, whose `serves()` is
   False on a B200. A B200 route module must offer the interface of its slot (`POLICY`, `GUARD`, `GUARD_STATS`, `overflow_peak`, `rescale_all`, ...) and read its switch through `fp8.env` with the preset's variable name.
-* Same preset semantics: `MINIWORLD_FP8=safe` sets `MINIWORLD_TRANSITION_FP8=calib` for both archs; a per-route variable set explicitly (also `""`) wins; default off (`tests/cpu/test_fp8_switch.py`: `test_b200_route_table`,
+* Same preset semantics: `FOLDJET_ENGINE_FP8=safe` sets `FOLDJET_ENGINE_TRANSITION_FP8=calib` for both archs; a per-route variable set explicitly (also `""`) wins; default off (`tests/cpu/test_fp8_switch.py`: `test_b200_route_table`,
   `test_b200_transition_route_follows_the_preset`). The token DiT's B200 route (agent C) lives in the H100 module `token_dit_fp8` itself, so it needed no entry.
 * Guards: the `and not b200` guard of `conditioned_transition/cuda/__init__.py` is agent C's (removed only for the token-DiT expand route that runs on B200). Nothing else changed in the dispatch except one
   `POLICY is not None` test at the top of `route_sm100a.transition_sm100a` (and its private `_fp8=False` keyword for the guard's fallback).
 
 ## 4. Transition FP8 on the B200 (`fp8_sm100a.py`)
-### 4.1 Design (the H100 recipe on tcgen05; one switch `MINIWORLD_TRANSITION_FP8=calib`, also `MINIWORLD_FP8=safe` / `engine-fp8`)
+### 4.1 Design (the H100 recipe on tcgen05; one switch `FOLDJET_ENGINE_TRANSITION_FP8=calib`, also `FOLDJET_ENGINE_FP8=safe` / `engine-fp8`)
 Three launches (PDL chain, `route_sm100a.transition_sm100a` takes the route first when `fp8_sm100a.POLICY is not None`, no grad, `serves()`):
 1. `tf8_ln` (`sm100/fp8/tf8_ln.cu`): one warp per row, fp32 two-pass LayerNorm, xn quantized straight to e4m3 with the LayerNorm-bound scale `sx` (never saturates).
 2. `tf8_gemm` MODE 0 (expand): A = xn8 [M, D], B = Wa8 / Wb8 [n D, D], two fp32 accumulators in TMEM (`kind::f8f6f4`, BN 128 per accumulator, 2 x 2 x 128 = 512 columns), epilogue
@@ -200,7 +200,7 @@ Kernel times at 65536 rows (eager, us; a launch floor is in each): D 384 ln 33 /
 timing only): D 768 full 288 us = no-math 251 (MMA-bound, 2.15 PF/s); D 512 143 vs 123; D 384 93 vs 74; D 256 53 vs 38: below K = 512 the silu + store epilogue and the tile prologue cost 20-30 %.
 
 ### 4.2 Gates (rows = batch x L^2 x ..., measured against the B200 default route)
-`ROW_GATE = {(512, 4): 1024, (512, 2): 4096, (768, 4): 4096, (768, 2): 4096}`; `WIDTHS = 512, 768`; `MINIWORLD_TRANSITION_FP8_MINROWS` / `_WIDTHS` override (experiments only). Reasons: D 768 n 4 x1.07 at 1024
+`ROW_GATE = {(512, 4): 1024, (512, 2): 4096, (768, 4): 4096, (768, 2): 4096}`; `WIDTHS = 512, 768`; `FOLDJET_ENGINE_TRANSITION_FP8_MINROWS` / `_WIDTHS` override (experiments only). Reasons: D 768 n 4 x1.07 at 1024
 rows, 0.90 at 2048, 0.60-0.65 from 4096; D 768 n 2 x1.30 at 1024, 1.16 at 2048, 0.51-0.76 from 4096; D 512 n 4 x0.50 from 1024 rows (the default is a slow path there: 45 us at 1024 rows); D 512 n 2 x0.63 at 4096, 0.88 at 16384+.
 D 128 / 256: served by the fused kernel since section 8 (gates in 8.6; the chain numbers of this paragraph are the chain forced on). Not served: **D 384** (x0.93-1.09 at 4096-262144 rows, 1.50 at 1024 rows, n 2: 1.09-1.21; section 8.5).
 
@@ -341,7 +341,7 @@ of the BUILT kernel. The H100 reference (docs/fp8.md "Transition forward", `tran
 | file | what |
 |---|---|
 | `sm100/fp8/tr8_fwd_sm100.cu` (new) | ONE fused 2-CTA kernel, `-DDIM=128|256 -DHID=n D`: the role structure of `tr_fwd_sm100.cu` (leader-issued M = 256 `cta_group::2` MMAs, B split by N across the pair, 128-row tiles per CTA, persistent) with e4m3 operands |
-| `sm100/fp8/tf8_gemm.cu` | `PAIRB` build: the chain GEMMs on 2-CTA clusters (two m-tiles at the same n, each CTA loads HALF of the B rows and multicasts them); same results, opt-in (`MINIWORLD_TRANSITION_FP8_PAIRB=1`) |
+| `sm100/fp8/tf8_gemm.cu` | `PAIRB` build: the chain GEMMs on 2-CTA clusters (two m-tiles at the same n, each CTA loads HALF of the B rows and multicasts them); same results, opt-in (`FOLDJET_ENGINE_TRANSITION_FP8_PAIRB=1`) |
 | `fp8_sm100a.py` | fused launch (`_launch_fused`), `FUSED_WIDTHS` / `FUSED_MIN_ROWS` / `ROW_GATE` / `ROW_MAX`, the cubin specs `f128n4 f128n2 f256n4 f256n2` (prebuild plan 813 -> 817 artifacts; 821 with `_PAIRB`) |
 | `tests/gpu/test_transition_fp8_b200.py` | 24 -> 48 tests (fused D 128 / 256 error + chain agreement, stress, sync / lazy guard through graphs, ragged rows, gates) |
 
@@ -459,7 +459,7 @@ no capture fallback), `test_nonfinite_input_does_not_break_the_guard` (inf in th
   (i) **CTA-pair B multicast** (`PAIRB`, the "CTA-pair squeeze", applied to expand and squeeze): bit-identical, D 384 n 4 65536 / 262144 rows 0.989 -> 0.979 / 1.055 -> 1.032 (cool graph), n 2 262144 1.248 -> 1.229: the squeeze's L2 intake is NOT the limit (-1..-2 %);
   (ii) e4m3 h with the bf16 residual path = what the chain already does (`resid` reads the bf16 x; the h round trip is e4m3); (iii) expand epilogue pipelining: the expand microbenchmark (`work/n13-fp8-a/mb_table2.txt`) reaches 770 TF/s e4m3 at K = 384 (35 % of the e4m3 peak,
   the plain GEMM with a bf16 output store: e4m3 / bf16 0.79 expand, 0.56 squeeze), i.e. the epilogue-bound tile (K = 384 = 3 K-blocks per tile) is the limit of the GEMM itself; with the measured one-lever gains of 1-2 % the best-effort chain does not beat the default
-  (x0.96-1.07 at >= 65536 rows). Not served; `MINIWORLD_TRANSITION_FP8_WIDTHS=384 _MINROWS=...` for experiments.
+  (x0.96-1.07 at >= 65536 rows). Not served; `FOLDJET_ENGINE_TRANSITION_FP8_WIDTHS=384 _MINROWS=...` for experiments.
 * **D 256 n 2 at >= 8192 rows**: fused kernel sustained 1.09 (16384), 1.03 (65536), 0.95 (147456), 0.96 (262144) rows, cool graph 1.00 / 1.06 / 1.09 / 1.11; chain 1.39 / 1.46 / 1.76 (graph); energy 0.87 / 0.85 / 0.94 / 0.95. Served only below 8192 rows (chain x0.78).
 * **D 128 below 4096 rows (n 4) / 16384 (n 2)**: the default is at its 12.3 / 10.3 us launch floor (fused kernel and default both 12.3 / 10.3 us at 1024-8192 rows, x1.00; chain 1.05-1.40).
 * **D 64**: not attempted (`wide_d64_fwd_small_f3`-class kernel, the H100 doc itself only bounds it on paper at 0.72-0.76; not in this order's width list).
@@ -526,7 +526,7 @@ D 384 and D 256 on the three-launch chain, forced at every row count (`ab_chain_
   `n1cfg/poison.py` (eager and captured-graph runs on 0xFF-poisoned allocator memory, 14 shapes D 384 / 512 / 768): ALL BITWISE EQUAL. Non-sm100 CUDA sources are byte-identical to `n14-base`; `backend_versions` unchanged (the default route does not change).
 * Tests: `tests/gpu/test_transition_fp8_b200.py` 48 passed (24 existing + 24 new); the combined run (this file, `test_fp8_switch`, `test_capture_api`, `test_prebuild_plan`, `test_trimul_fp8_b200_cpu`, `test_trimul_fp8_b200`, `test_engine_fp8_backend`, `test_transition_b200_uninit`, `test_trimul_b200`,
   `test_triattn_b200`, `test_triattn_b200_capture_bits`, `test_misc_b200`, `test_local_dit_b200`): 517 passed, 7 skipped (H100-only), 2 min.
-* `_prebuild --arch sm100 --check`: full output `work/n14-f/prebuild_check_f.txt` (base `prebuild_check_base.txt`): 813 -> 821 artifacts at the time of that run (the 4 fused cubins + the 4 `PAIRB` cubins; the `PAIRB` cubins are planned only with `MINIWORLD_TRANSITION_FP8_PAIRB=1` in the final tree: 817), native sources compiled by a planned artifact
+* `_prebuild --arch sm100 --check`: full output `work/n14-f/prebuild_check_f.txt` (base `prebuild_check_base.txt`): 813 -> 821 artifacts at the time of that run (the 4 fused cubins + the 4 `PAIRB` cubins; the `PAIRB` cubins are planned only with `FOLDJET_ENGINE_TRANSITION_FP8_PAIRB=1` in the final tree: 817), native sources compiled by a planned artifact
   216 -> 217; rc = 1 on both trees (pre-existing H100-family notes), no other line differs.
 
 ### 8.8 Open items (exact)
@@ -536,7 +536,7 @@ D 384 and D 256 on the three-launch chain, forced at every row count (`ab_chain_
 * D 384 fused (tensor memory: 384 output columns + [a|b]): not built; the chain is within 1.00-1.07 of the default at >= 65536 rows.
 * D 64, D 1024 fused: not built (D 1024 stays on the shipped chain; D 64 is not a multiple of 128).
 * End-level (structure) accuracy of the e4m3 Transition on the B200 was not measured (module level only).
-* `MINIWORLD_FP8=safe` now serves the Transition at D 128 / 256 as well (WIDTHS default `128,256,512,768`): revert to `512,768` in `WIDTHS` to keep the 3.0.3 `safe` scope on B200 unchanged.
+* `FOLDJET_ENGINE_FP8=safe` now serves the Transition at D 128 / 256 as well (WIDTHS default `128,256,512,768`): revert to `512,768` in `WIDTHS` to keep the 3.0.3 `safe` scope on B200 unchanged.
 
 # Agent B: TriMul FP8 (B200)
 
@@ -571,11 +571,11 @@ Design decisions forced by tcgen05 (the H100 recipe otherwise transfers unchange
 * **Any L:** ctr8 uses 3-D tensor maps ([plane][row][col]) so tiles clip at L (out-of-range rows / columns read zero and are not stored); L % 16 != 0 is padded on the host with masked tokens like the default (`_padded_inference`). The route declines lengths far from a multiple of 128 (tile quantisation: L400 D256 measured +5 % slower than bf16): `L / ceil128(L) >= 0.9`.
 
 ### Scales, calibration, guard (the H100 contract)
-* First eager call of a module: a probe launch of the front with qinv = 1 gives the exact amax per group (a, b; per direction), `pow2_scale` (smallest 2^e with amax / 2^e <= 448, floor 2^-30, all-zero -> 1) x HEADROOM 16 (`MINIWORLD_TRIMUL_FP8_HEADROOM`); static afterwards, cached per module (key: data_ptr of `to_left.weight`, dropped by `weakref.finalize`).
+* First eager call of a module: a probe launch of the front with qinv = 1 gives the exact amax per group (a, b; per direction), `pow2_scale` (smallest 2^e with amax / 2^e <= 448, floor 2^-30, all-zero -> 1) x HEADROOM 16 (`FOLDJET_ENGINE_TRIMUL_FP8_HEADROOM`); static afterwards, cached per module (key: data_ptr of `to_left.weight`, dropped by `weakref.finalize`).
 * `GUARD`: `sync` (default; eager: the call reads the peak, > 448 -> scales x 2^ceil(log2(peak / 448 x 2)), refresh, redo <= 4 times, then the bf16 route), `lazy` (capturable; kernel atomically maxes the scaled peak into a per-device buffer), `off`. A capture before any calibration takes the bf16 route (`capture_fallbacks`).
 * `overflow_peak()` (one host sync, once per forward outside graphs), `rescale_all(peak)` (in place; captured graphs follow; tested: stale scales 64x too small -> peak > 448 on replay -> `rescale_all` -> the SAME graph is accurate again).
 * LN_in makes the planes invariant to the input scale and offset: input stress (x scale 1e-3 .. 40, offsets 0 / 25) never saturates (peak 17-23 of 448 at 16x headroom); saturation can only come from stale scales (weights changed after calibration) or heavy outlier channels.
-* Switches (same names as H100, read via `fp8.env`): `MINIWORLD_TRIMUL_FP8` {calib, dynamic}, `_GUARD`, `_HEADROOM`, `_MINL` (replaces every gate, 0 = none). Counters: `b200_fp8.GUARD_STATS` (calls, retries, fallbacks, capture_fallbacks, calibrations). Registration for `fp8.py`: `work/n13-fp8-b/FP8_REGISTER.md`.
+* Switches (same names as H100, read via `fp8.env`): `FOLDJET_ENGINE_TRIMUL_FP8` {calib, dynamic}, `_GUARD`, `_HEADROOM`, `_MINL` (replaces every gate, 0 = none). Counters: `b200_fp8.GUARD_STATS` (calls, retries, fallbacks, capture_fallbacks, calibrations). Registration for `fp8.py`: `work/n13-fp8-b/FP8_REGISTER.md`.
 
 ### Served
 bf16 master modules, inference (no grad, no live dropout), TriangleMultiplication outgoing / incoming, Bidirectional, RF3 (D <= 128, one sample), D 64 / 128 / 256 / 384 / 512 with the bf16 route's hidden widths, any L with `L / ceil128(L) >= 0.9` and L >= MIN_L (below the gate the bf16 route runs unchanged), B up to one default launch.
@@ -674,7 +674,7 @@ At large activations / offsets both routes are limited by the bf16 rounding of y
 * **Ablations** (7 extension variants in ONE process, interleaved, min of 8 rounds; k1w8 / k1w, D128 P256 L1024 / D256 P512 L1024; a colleague's job shared GPU 1, so absolute times were 2x the quiet ones): full epilogue 1.025 / 1.005; guard flush off 1.009 / 0.943; amax off 1.010 / 0.944; qinv multiply off 0.977 / 0.999; cvt off 1.033 / 1.004; stmatrix off 0.993 / 0.930; scale as packed FMUL2 1.015 / 1.006. Reading: with the lanes' token shuffle the e4m3 front is within +0.5-2.5 % of k1w in isolation (the +4-18 % of the first measurement was clock / foreign-load noise); the only kept change is the packed FMUL2 scale (`F8_ABL` 128, default). The qinv multiply could be folded into the packed weights (H100 way) for another ~1-4 % of the FRONT = ~1 % of the module: not done (it forces a weight copy per rescale).
 * **Gate-projection-only e4m3 front (H100 emulation: +0.3-0.5 % update error on top of the planes, 4.25 % vs 3.72 %)**: NOT implemented. It needs LN_in(z) quantised to e4m3 plus W_ag / W_bg e4m3 in a second MMA chain with a second xn image in TMEM per weight block (k1w's TMEM columns are full at D128: 3 x 128 accumulators + xn) -- a front rewrite, and the front is only 25-35 % of the module with the MMA a part of it; the upper bound (half of the gate chain at e4m3 rate) is at most ~3-5 % of the module at D256+ and ~1-2 % at D128 (H100's own estimate: -7 % of the module at D256 L2048). Below the cost of the rewrite for what is left of the session.
 * **Gates re-measured** (graph replay, same protocol, GPU shared with a foreign job: +-3 %): D128 out L384 1.004 gap / 0.968 energy, D128 bidir L384 1.025 / 0.938, D256 out L384 0.969 / 0.975, D64 out L384 0.986 / 0.948, D64 out L512 0.980 / 0.861, D64 bidir L256 1.025 / 0.870, D64 bidir L384 0.976 / 0.939. New MIN_L = served only where the gap ratio is <= 0.99: D64 out / in 512, D64 bidir 384, D128 every direction 512, D256 out / in 384, D256 bidir 256, D384 512, D512 128 (`b200_fp8.MIN_L`).
-* **`MINIWORLD_FP8=safe` preset path verified end to end** with agent A's fp8.py (copy of the tree n13-fp8-bx = n13-fp8-b + A's `fp8.py` / `fp8_sm100a.py`, `work/n13-fp8-b/dev/py/t_preset.py`): `fp8.arch()` = sm100, `status()["trimul"]` = calib, `_modules()[1]` = `b200_fp8`; eager calls take the route (`route_stats()["trimul"]` calls 2, calibrations 1, fallbacks 0); a captured graph takes the route (`capture_fallbacks` 0, graph == eager bitwise); `check()` False when clean, True after the scales were made 64x too small (the replay saturated), False after the in-place rescale; `fp8.disable()` returns to the bf16 route.
+* **`FOLDJET_ENGINE_FP8=safe` preset path verified end to end** with agent A's fp8.py (copy of the tree n13-fp8-bx = n13-fp8-b + A's `fp8.py` / `fp8_sm100a.py`, `work/n13-fp8-b/dev/py/t_preset.py`): `fp8.arch()` = sm100, `status()["trimul"]` = calib, `_modules()[1]` = `b200_fp8`; eager calls take the route (`route_stats()["trimul"]` calls 2, calibrations 1, fallbacks 0); a captured graph takes the route (`capture_fallbacks` 0, graph == eager bitwise); `check()` False when clean, True after the scales were made 64x too small (the replay saturated), False after the in-place rescale; `fp8.disable()` returns to the bf16 route.
 
 
 # Agent C: token DiT / atom DiT FP8 (B200)
@@ -704,8 +704,8 @@ Gates (`token_dit_fp8.active(..., b200=True)`): bf16 only, D 768, M = A B L a mu
 OpenDDE ...) and Chai-1's identity block; NOT served: RoseTTAFold3 (k-q LN parallel block), Boltz-2 (up gate: no 3-operand kernel), fp32, training.
 Chai-1 (parallel schedule): the transition runs on a side stream beside the attention core; a persistent expand grid over all 148 SMs waits for the core's CTAs (Chai-1 L512 A5:
 1.044 with 148 CTAs, 0.964 with 96, 1.001 with 32): the grid is capped at `B200_PAR_CTAS` = 96 there.
-Switches: `MINIWORLD_TOKEN_DIT_FP8=expand` (module `PLACES`), `MINIWORLD_TOKEN_DIT_FP8_MIN_ROWS`, `MINIWORLD_TOKEN_DIT_FP8_B200` (placements the B200 serves, default `expand`),
-`MINIWORLD_TOKEN_DIT_FP8_B200_DEFS` (extra -D of the cubin, default `SIG_TANH`), `MINIWORLD_TOKEN_DIT_FP8_B200_CTAS` (grid override for experiments).
+Switches: `FOLDJET_ENGINE_TOKEN_DIT_FP8=expand` (module `PLACES`), `FOLDJET_ENGINE_TOKEN_DIT_FP8_MIN_ROWS`, `FOLDJET_ENGINE_TOKEN_DIT_FP8_B200` (placements the B200 serves, default `expand`),
+`FOLDJET_ENGINE_TOKEN_DIT_FP8_B200_DEFS` (extra -D of the cubin, default `SIG_TANH`), `FOLDJET_ENGINE_TOKEN_DIT_FP8_B200_CTAS` (grid override for experiments).
 Prebuild: `_prebuild --arch sm100` lists `token_dit_fp8_rows_sm100` and `augattn_sm100/gemm_swiglu_f8_sm100` for width-768 bf16 inference token rows.
 
 ### Kernel alone (graph, 50 back-to-back, median of 7; bf16 route = cuBLAS + `swiglu_rows` below 3840 rows, the sm_100a bf16 SwiGLU GEMM from there)
@@ -812,7 +812,7 @@ the eager route within 2 % of max |y|: test). The only B200-specific error sourc
 * H100 transfers not taken: `ht = 64` tiling, wgmma n192 up kernel, the sm90 weight packs.
 
 ### Atom DiT: measured, no B200 route built
-The 3.0.3 atom DiT route (`local_dit_h100.FP8_ROWS`: e4m3 `pre90_f8` / `post90_f8` row kernels) is an H100 wgmma kernel family; `MINIWORLD_ATOMDIT_FP8` stays unserved on B200 (`serves()` is H100 only).
+The 3.0.3 atom DiT route (`local_dit_h100.FP8_ROWS`: e4m3 `pre90_f8` / `post90_f8` row kernels) is an H100 wgmma kernel family; `FOLDJET_ENGINE_ATOMDIT_FP8` stays unserved on B200 (`serves()` is H100 only).
 What the B200 chain looks like (docs/b200/atom-dit.md, "Second pass" / "Third pass"): the bf16 inference stages (`qkvg_fwd1t / fwd3`, `attn_fwd`, `ffn_fwd1t / fwd3`, K = 128 / 256, d_atom 128, hidden 256) are row-thread and TMA-latency bound, not tensor bound
 ("9500 -> 5650 ticks per tile, all of it row-thread work now"; "a cold TMA load lands ~2.3 us after its issue"); the modulation GEMMs run per row inside the kernels from smem operands.
 Measured bf16 block time (graph, B200 GPU 2, A = 5, master, shared conditioning, `_tools/blk.py` default column): AtomDiTProtenix / OpenFold3 / Boltz2 / Chai1 5 x 1024 atoms 28.4-31.4 us, 5 x 4096 atoms 49.5-53.8 us, 5 x 8192 atoms
@@ -828,7 +828,7 @@ loss of the "bit-identical bf16 cubins" and the accuracy cost; no atom DiT file 
 2. MXFP8 (block-32 e8m0 scales, `kind::mxf8f6f4` / cuBLAS block-scaled `_scaled_mm`): h written as MXFP8 by the expand epilogue (one thread = 32 units = one scale block) feeding a block-scaled squeeze; measured GEMM
    gain 0.3-1.3 us per GEMM (table above), not built; needs the 128x4 swizzled scale layout in the epilogue.
 3. The e4m3 expand at 64-unit chunks (more items than SM pairs below 2560 rows: ~1 us of 10 us at M 1920); PDL for the expand kernel (the row passes of the 3.0.3 file never trigger their dependents early).
-4. End-level (200-step diffusion, FoldForge RMSD) acceptance is NOT re-run on B200: the quantisation recipe / operand error are the 3.0.3 ones; only the module-level fp64 protocol was run.
+4. End-level (200-step diffusion, FoldJet RMSD) acceptance is NOT re-run on B200: the quantisation recipe / operand error are the 3.0.3 ones; only the module-level fp64 protocol was run.
 5. Activation scales of rows whose max is denormal (|row max| < 1e-35) are not floored (the H100 row kernels are shared byte for byte); AdaLN outputs cannot be such rows.
 6. `fp8.py` registration: see `$W/b2511/work/n13-fp8-c/FP8_REGISTER.md` (agent A).
 
@@ -859,7 +859,7 @@ MMA instruction (kind::f8f6f4, K=32/step, 128 elems per 128B swizzle block -> NK
 
 Product code: `kernels/integrations/opm_fp8_b200.py` + `csrc/sm100/opm_fp8_b200.cu` (cast helper), `pwa_fp8_b200.py`; hooks in `opm_sm100.py` (`_forward`, `_product_and_counts`) and `pwa_sm100.py` (`_contract`, `_forward`);
 two new template flags / entry points in the sm_100a sources `csrc/sm100/opm_sm100.cu` (`opm_prologue_sm100<WT, F8>`, `opm_prologue_f8`) and `csrc/sm100/pwa_sm100.cu` (`ln_vg_body<WT, F8>`, `ln_vg_f8`): the F8 = false instantiations are the
-default kernels (the default route stays bit-identical, see Verification). Switches are the H100 route's: `MINIWORLD_OPM_FP8=bound` (`opm_fp8.POLICY`), `MINIWORLD_PWA_FP8=1` (`pwa_fp8.ENABLED`), so `fp8.enable` already reaches them.
+default kernels (the default route stays bit-identical, see Verification). Switches are the H100 route's: `FOLDJET_ENGINE_OPM_FP8=bound` (`opm_fp8.POLICY`), `FOLDJET_ENGINE_PWA_FP8=1` (`pwa_fp8.ENABLED`), so `fp8.enable` already reaches them.
 
 ### Decision from the B200 blockers tables (which stage is tensor / HBM bound, where e4m3 can win)
 Stage times, B200 GPU 2/3, graph replay, `torch.profiler`, default route (`_tools/prof3.py`):
@@ -980,7 +980,7 @@ What the framework owner registers: `$W/b2511/work/n14-d/FP8_REGISTER.md` (`fp8.
   The e4m3 NaN byte (127) cannot be formed: after the vote t <= 15.5, so no upper clamp is needed; a non-finite input gives a NaN byte, then the exact recompute.
 * **Where the H100 routes went**: `pv_fused` (front writes V^T) -> the d_pair-128 call (the B200 front writes bf16 v, the pass converts; the front is not touched); `pv_front` / `pv_pass` -> every other head-dim-32 site (the same pass; counted as `pv_front`);
   `pv_d64` -> the `TF_D = 64` build (built, gate closed, D.5); `qk` (e4m3 q / k): ceiling measured, route not built (D.5). The H100's NaN-byte clamp is the `relu` + the vote. Model whitelist unchanged and enforced by `fp8.enable_triattn` (af3 protenix1 opendde protenix2 openfold3 rosettafold3 chai1; Boltz-2 and IntelliFold2 stay OFF).
-* **Shipped gates** (below them the bf16 core runs, bit-identical to FP8 off): padded S >= 1024 for every head-dim-32 kind (`MINIWORLD_TRIATTN_B200_FP8_MINS`); the 64-channel-head core closed (`..._MINS64`, default 2^30).
+* **Shipped gates** (below them the bf16 core runs, bit-identical to FP8 off): padded S >= 1024 for every head-dim-32 kind (`FOLDJET_ENGINE_TRIATTN_B200_FP8_MINS`); the 64-channel-head core closed (`..._MINS64`, default 2^30).
 
 ### D.2 Kernel level: e4m3 core against the bf16 core (same process, interleaved, 3 rounds, GPU 0 exclusive; events after a 0.15 s idle gap; bf16 core = the shipped best build of the length: HB + QS, 3 rows; 4 heads x 32, N = L rows, B = 1; `t_speed.py`, `t_abl*.py`)
 
@@ -1092,12 +1092,12 @@ graph replay == eager bytes (`test_graph_equals_eager_and_uncalibrated_capture`)
 
 ### D.7 TriAttn e4m3 q / k (n21-qk, 2026-11-21): built, measured, served from S >= 1024 (fused d_pair 128; unfused d_pair 64 fronts only on request)
 
-Opt-in like the P / V route (it needs `fp8.enable_triattn` with qk, i.e. the models af3 / protenix1 / openfold3 / rosettafold3 of `fp8.TRIATTN_MODELS`, fused kind; `MINIWORLD_TRIATTN_B200_FP8_QK_KINDS=unfused` adds the d_pair-64 fronts); FP8 off is bit identical to n18-cache (below).
+Opt-in like the P / V route (it needs `fp8.enable_triattn` with qk, i.e. the models af3 / protenix1 / openfold3 / rosettafold3 of `fp8.TRIATTN_MODELS`, fused kind; `FOLDJET_ENGINE_TRIATTN_B200_FP8_QK_KINDS=unfused` adds the d_pair-64 fronts); FP8 off is bit identical to n18-cache (below).
 Tools and raw logs: `$W/b2511/work/n21-qk/` (`t_q8.py` core, `t_mod3.py` module, `rg.sh` / `q*.sh` runners, `core_speed.log`, `mod_acc_*.log`, `fin_<gpu>_<case>.log` final timings, `m2_ / m3_time_*.log` the iterations, `pt*_*.log` tests, `bits_*`).
 
 **What is built.**
 * Core: `triattn_f8_sm100.cu -DTF_Q8=1` (D = 32 and, built, D = 64): QK^T = `tcgen05.mma kind::f8f6f4` e4m3 x e4m3 -> fp32 in TMEM, K = 32 in ONE MMA (the bf16 core issues two of K = 16); q / k tiles are TMA boxes of 32 B (64 B at D = 64) with the 32B (64B) swizzle, smem descriptors SBO 256 (512). Scales: per head powers of two `qa0` (q8 = e4m3(q qa0 qvi)), `ka0` (k8), product 1 at calibration (H100 `qk_scale_from_amax`, headroom 2: q, k scaled so that |q8|, |k8| <= 224, absmax product must fit), a logit multiplier `lm0 qv^2` (`qv` = the in-place widening factor `fp8.check()` -> `rescale_all` multiplies, `qvi = 1 / qv`): `x = f16(S) * scale * lm + bias`; the softmax statistics, the row offset, the P / V path, `exact_row8` (an e4m3 recompute for the rows the window cannot hold) are the P / V core's. Saturation guard = the P / V route's (`guard[1]`, `fp8.check()`, captured graphs follow `qv`).
-* Where the rows come from: (1) the FRONT writes them: `tri_front_sm100<..., Q8>` (fused d_pair 128 = `tri_front_q8`, d_pair 64 with 4 x 32 / 2 x 32 = `tri_front64_q8`): the drain scales the fp32 accumulators, converts (`cvt.rn.satfinite.e4m3x2`), stages 32 x 32 B in the 32B-swizzled ring and TMA-stores; the bf16 q / k stores are gone; the guard max is kept in a register and written once after the last tile. (2) a standalone pass (`f8_qkq`, the experiment `MINIWORLD_TRIATTN_B200_FP8_QK_PASS=1`): used for the d_pair 256 / 384 and 64-channel sites, which have no e4m3 front (wide fronts not changed).
+* Where the rows come from: (1) the FRONT writes them: `tri_front_sm100<..., Q8>` (fused d_pair 128 = `tri_front_q8`, d_pair 64 with 4 x 32 / 2 x 32 = `tri_front64_q8`): the drain scales the fp32 accumulators, converts (`cvt.rn.satfinite.e4m3x2`), stages 32 x 32 B in the 32B-swizzled ring and TMA-stores; the bf16 q / k stores are gone; the guard max is kept in a register and written once after the last tile. (2) a standalone pass (`f8_qkq`, the experiment `FOLDJET_ENGINE_TRIATTN_B200_FP8_QK_PASS=1`): used for the d_pair 256 / 384 and 64-channel sites, which have no e4m3 front (wide fronts not changed).
 * Calibration: the first eager call of a site (`_calibrate_qk`: absmax per head of q and k) runs the P / V core on the bf16 rows; from the second call the front writes e4m3 rows. A capture of an uncalibrated site declines (counted, `qk_declined`).
 
 **Core, QK^T operands only (fp64 gold, random q / k / v / bias, 4 heads x 32, N = 16 rows; judge `max|o - o64| / max|o64|`, rms of the error / rms of o64)**
@@ -1145,7 +1145,7 @@ The ablation of D.2 (one of two QK^T MMAs, -5.0 %) under-estimated it: the e4m3 
 
 Not served (the route would be the standalone pass; measured with `QK_PASS`, first run, same protocol; C / B gap, sustained): 256x8x32 L1024 1.042 / 1.023, L2048 1.011 / 0.986; 384x12x32 L1024 1.037 / 1.020, L2048 1.006 / 0.982; Chai-1 256x4x64 (d64 core, gate opened) L1024 1.071 / 1.039, L2048 1.032 / 0.992; RF3 64x4x64 (d64) L1024 1.063 / 1.061, L2048 1.032 / 0.997. The 64-channel-head core does not benefit from e4m3 q / k either (no e4m3 front for it; with the pass it loses 3-7 %).
 
-**Gates set from these numbers** (`b200_fp8.QK_MINS_SHIPPED`; rule: open only where the q / k route is >= 2 % faster than the P / V-only route in the gap protocol AND sustained, reproduced on two GPUs): `fused` 1024, `unfused` 1024 (effective for the d_pair-64 fronts only, and only with `MINIWORLD_TRIATTN_B200_FP8_QK_KINDS=unfused`: the whitelist's qk flag covers the fused kind), `d64` closed. Below S = 1024 the P / V route itself is not served. `status()["triattn"]["qk"]` is True only when the H100-module switch (`enable_triattn` qk, whitelisted model) is on AND a gate is open. L1024 gain 3.5 % (gap) / 6.5 % (sustained), L4096 4.4 % / 9-11 %; the gain under the power cap is larger because the e4m3 q / k route draws less power at the same work (1906-1964 MHz against 1836-1896).
+**Gates set from these numbers** (`b200_fp8.QK_MINS_SHIPPED`; rule: open only where the q / k route is >= 2 % faster than the P / V-only route in the gap protocol AND sustained, reproduced on two GPUs): `fused` 1024, `unfused` 1024 (effective for the d_pair-64 fronts only, and only with `FOLDJET_ENGINE_TRIATTN_B200_FP8_QK_KINDS=unfused`: the whitelist's qk flag covers the fused kind), `d64` closed. Below S = 1024 the P / V route itself is not served. `status()["triattn"]["qk"]` is True only when the H100-module switch (`enable_triattn` qk, whitelisted model) is on AND a gate is open. L1024 gain 3.5 % (gap) / 6.5 % (sustained), L4096 4.4 % / 9-11 %; the gain under the power cap is larger because the e4m3 q / k route draws less power at the same work (1906-1964 MHz against 1836-1896).
 
 **Accuracy (module, judge form max|y - y64| / max|y64| against the fp32 PyTorch statements, random non-zero weights, key mask; A default, B P / V, C q / k from the front, P calibration call (pass)): 'x' = the P / V route's value**
 
@@ -1182,7 +1182,7 @@ cites numbers of a BUILT kernel.
 | atom DiT `post` (Wo, SwiGLU expand incl. Boltz-2 up gate, `post_fwd_f8.cu`) | yes: Wo (smem A) and [Wa; Wb; Wu] (TMEM A) on e4m3, gated / x2 quantised by the row threads | same | stage alone 0.94 .. 1.04; ablation 0.90 .. 0.97 |
 | atom DiT squeeze (Ws, K 256) | NOT built (needs a cross-lane row amax of h and an e4m3 transposed store); measured bound: `SQABL` build (e4m3 squeeze MMA on garbage, free quantisation) | no | see E.2 (SQABL row) |
 | Boltz-2 token DiT up-gate expand (`gemm_swiglu_f8_up_sm100.cu`) | yes: 2-CTA M256 N192 tiles [a64 | b64 | u64], 64-unit items | `expand` placement, rows >= 1280 (default on with `expand`) | kernel 0.45-0.77 of the bf16 route (cuBLAS + `swiglu_rows`) from M 1280, block 0.89-0.96 (M 1280 .. 5120) |
-| RoseTTAFold3 token DiT expand (`rows_q8` + the e4m3 expand, parallel non-identity block) | the B200 guard of `token_dit_fp8.active` opened (`MINIWORLD_TOKEN_DIT_FP8_B200_RF3`, default on) | `expand` placement, rows >= 2560 | 0.95-0.99 of the block from 2560 rows (E.5), coin flip below |
+| RoseTTAFold3 token DiT expand (`rows_q8` + the e4m3 expand, parallel non-identity block) | the B200 guard of `token_dit_fp8.active` opened (`FOLDJET_ENGINE_TOKEN_DIT_FP8_B200_RF3`, default on) | `expand` placement, rows >= 2560 | 0.95-0.99 of the block from 2560 rows (E.5), coin flip below |
 | token DiT qkvg / out / squeeze, Chai-1 identity out / squeeze | the H100 forms (cuBLAS e4m3 `_scaled_mm` + quantising row passes) re-measured alone and in the H100 combinations | no | qkvg 0.99-1.01, out 1.02-1.05, squeeze 1.02-1.05, qkvg + expand = expand (0.93-0.985), all four 1.00-1.04 (E.5) |
 
 ## E.1 Atom DiT rows route: design (the H100 recipe on tcgen05)
@@ -1255,7 +1255,7 @@ The blocks are far below the 1000 W cap at these sizes (420-620 W), so time and 
 
 ### Decision (served / not served)
 
-* Served (opt-in, `MINIWORLD_ATOMDIT_FP8_B200=1`): rows <= 10240 (`f8.MAX_ROWS`; 1024 atoms x 5 samples: -1 .. -5 % time (class means, up to -7 % on single variants), -7 .. -9 % energy; 2048 x 5: level time, -4 .. -5 % energy). Above it the measured time is +1.5 .. +6 % (4096 atoms: 1.002-1.030,
+* Served (opt-in, `FOLDJET_ENGINE_ATOMDIT_FP8_B200=1`): rows <= 10240 (`f8.MAX_ROWS`; 1024 atoms x 5 samples: -1 .. -5 % time (class means, up to -7 % on single variants), -7 .. -9 % energy; 2048 x 5: level time, -4 .. -5 % energy). Above it the measured time is +1.5 .. +6 % (4096 atoms: 1.002-1.030,
   8192 atoms: 1.019-1.038, five-fold stacks 1.018-1.057), the energy gain (2-5 %) does not pay for it.
 * The gain is 1-2 us of a ~30 us block call at best; end to end the atom DiT is 3-12 % of a warm forward, so the route is worth <= 0.3 % of a forward. It stays out of `safe`.
 * Not served: fp32 / training / `save`, `AtomDiTMiniWorld` and `SWAAtomTransformer` (the swa_dit chain, no H100 route either), the non-pair `AtomDiTESMFold2` (never reaches the tcgen05 block).
@@ -1310,7 +1310,7 @@ Gate 1280 rows (640 rows is a coin flip: 1.033 / 0.961 on two variants). Error: 
 
 ## E.5 Token DiT: placements re-measured the H100 way, alone and in the H100 combinations
 
-Same protocol as above (`blk.py` of agent C, B200 placements selected by `MINIWORLD_TOKEN_DIT_FP8_B200`, every row gate removed, cool = 0.15 s gap, 7 rounds, median over the registry variants [min .. max]; Protenix 13 variants, Chai-1 6; A = 5, L 256 / 512 / 768 / 1024).
+Same protocol as above (`blk.py` of agent C, B200 placements selected by `FOLDJET_ENGINE_TOKEN_DIT_FP8_B200`, every row gate removed, cool = 0.15 s gap, 7 rounds, median over the registry variants [min .. max]; Protenix 13 variants, Chai-1 6; A = 5, L 256 / 512 / 768 / 1024).
 The forms are the H100 ones (cuBLAS e4m3 `_scaled_mm` row-wise for qkvg / out / squeeze, the quantising AdaLN passes `adaln_in_rows_cf_q8` / `resgate_adaln_cf_q8` / `adaln_in_rows_cf_par_q8` of the arch-neutral `token_dit_fp8_rows.cu` built for sm_100a,
 `rows_q8` for the standalone passes):
 
@@ -1337,7 +1337,7 @@ The forms are the H100 ones (cuBLAS e4m3 `_scaled_mm` row-wise for qkvg / out / 
 * Why `out` / `squeeze` cannot follow the H100 recipe "quantise in the previous kernel's epilogue": og is written by 16 head CTAs (48 channels each) so no CTA owns the row maximum, and h (the expand's output) spans 12 expand tiles per row; a per-row scale
   therefore needs its own pass (`rows_q8`: 3.6-5.9 us at M 2560-5120), which is what these placements lose. The only epilogue-quantisation form that fits is block scaling along K (MXFP8, `kind::mxf8f6f4`, 32-element e8m0 blocks; 48-channel heads straddle blocks).
   Upper bound with a FREE quantisation (cuBLAS e4m3 GEMM alone, agent C's table: out 4.9 -> 4.9 us at M 2560 and 7.1 -> 6.8 at 5120; squeeze 6.7 -> 5.9 and 10.7 -> 8.4): <= 0.8 us at M 2560 (0.8 % of the block), <= 2.6 us at 5120 (1.4 %). Not built.
-* RoseTTAFold3 `expand` (parallel non-identity block, `rows_q8(xt)` + the e4m3 expand, guard opened by `MINIWORLD_TOKEN_DIT_FP8_B200_RF3=1`): the block (RoseTTAFold3, A = 5, r109 / r186) e4m3 / default at M 640 / 1280 / 2560 / 3840 / 5120: 1.043 / 0.966, 0.978 / 1.038, 0.995 / 0.951, 0.963 / 0.973, 0.971 / 0.970 (update rms 5.3-5.4 % against 0.65-0.70 %, 7.7-8.9x): a 3 % gain from 2560 rows, a coin flip below. Served with the `expand` placement from 2560 rows (`MIN_ROWS_B200_RF3`, default on, `MINIWORLD_TOKEN_DIT_FP8_B200_RF3=0` turns it off). The first agent declined this block on an estimate (the quantising pass costs what the expand saves): the measured pass (`rows_q8`) is hidden behind the side-stream schedule.
+* RoseTTAFold3 `expand` (parallel non-identity block, `rows_q8(xt)` + the e4m3 expand, guard opened by `FOLDJET_ENGINE_TOKEN_DIT_FP8_B200_RF3=1`): the block (RoseTTAFold3, A = 5, r109 / r186) e4m3 / default at M 640 / 1280 / 2560 / 3840 / 5120: 1.043 / 0.966, 0.978 / 1.038, 0.995 / 0.951, 0.963 / 0.973, 0.971 / 0.970 (update rms 5.3-5.4 % against 0.65-0.70 %, 7.7-8.9x): a 3 % gain from 2560 rows, a coin flip below. Served with the `expand` placement from 2560 rows (`MIN_ROWS_B200_RF3`, default on, `FOLDJET_ENGINE_TOKEN_DIT_FP8_B200_RF3=0` turns it off). The first agent declined this block on an estimate (the quantising pass costs what the expand saves): the measured pass (`rows_q8`) is hidden behind the side-stream schedule.
 
 
 ### Accuracy, token DiT (fp64 gold, `acc_tok.py`, L 384, A 5; update rms bf16 default -> e4m3; same grid as E.3)
@@ -1385,7 +1385,7 @@ The forms are the H100 ones (cuBLAS e4m3 `_scaled_mm` row-wise for qkvg / out / 
 # Agent G (2026-11-19): the REMAINDER of the MSA-family and TriMul routes -- built first, measured, then gated
 
 Rule of this section (user order): every H100 FP8 route that the 3.0.3 engine has gets a best-effort B200 kernel BUILT first; what is served (gated) and what stays bf16 is decided from the measured
-numbers of the BUILT kernel. Everything stays opt-in and OFF by default (`MINIWORLD_OPM_FP8=bound`, `MINIWORLD_PWA_FP8=1`, `MINIWORLD_TRIMUL_FP8=calib`). H100 digests (what is e4m3, scales, gates and why, accuracy,
+numbers of the BUILT kernel. Everything stays opt-in and OFF by default (`FOLDJET_ENGINE_OPM_FP8=bound`, `FOLDJET_ENGINE_PWA_FP8=1`, `FOLDJET_ENGINE_TRIMUL_FP8=calib`). H100 digests (what is e4m3, scales, gates and why, accuracy,
 speedups, traps, "transfers unchanged vs redo for tcgen05"): `docs/b200/fp8_h100_msa_digest.md` (OPM / PWA / PWA BIG / grouped OPM), `docs/b200/fp8_h100_trimul_digest.md` (TriMul).
 Protocol of every table: B200 GPU 3 (`dev.sh -x`, no foreign pid), same-process interleaved A/B (default vs e4m3 vs a same-route control; `ctrl` 0.99-1.01 everywhere), CUDA graph of one call,
 0.15 s idle gap before each timed burst, medians of 5-9 rounds; "sustained" = back-to-back replays (power cap), energy = mean `nvidia-smi` power x time. Scripts: `work/n14-g/{py,tools_msa}`, raw rows `work/n14-g/{opm,pwa}/*.jsonl`.

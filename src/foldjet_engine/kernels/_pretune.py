@@ -69,6 +69,8 @@ import traceback
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
+
 if TYPE_CHECKING:
     from foldjet_engine.measure.config import Case
 

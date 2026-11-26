@@ -16,6 +16,8 @@ swiglu / swiglu_bwd 0.4-3 us slower than cuBLAS + the row pass at 128 - 1024 row
 
 from __future__ import annotations
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
+
 import ctypes
 import functools
 import os
@@ -26,10 +28,10 @@ import torch
 _dir = str(Path(__file__).parent)
 BM, BK = 128, 64
 #: rows up to which the fused GEMMs serve (above it cuBLAS's tiles fill the card)
-MAX_M = int(os.environ.get("MINIWORLD_TDT_EPI_MAX_M", "1024"))
-ENABLED = os.environ.get("MINIWORLD_TDT_EPI", "1") != "0"
-#: per-epilogue switches (``MINIWORLD_TDT_EPI_OFF=resc,swf,swb``)
-_OFF = set(filter(None, os.environ.get("MINIWORLD_TDT_EPI_OFF", "").split(",")))
+MAX_M = int(os.environ.get("FOLDJET_ENGINE_TDT_EPI_MAX_M", "1024"))
+ENABLED = os.environ.get("FOLDJET_ENGINE_TDT_EPI", "1") != "0"
+#: per-epilogue switches (``FOLDJET_ENGINE_TDT_EPI_OFF=resc,swf,swb``)
+_OFF = set(filter(None, os.environ.get("FOLDJET_ENGINE_TDT_EPI_OFF", "").split(",")))
 
 
 class _Args(ctypes.Structure):
@@ -48,7 +50,7 @@ class _Args(ctypes.Structure):
 
 
 def _cfg(name: str, default: int) -> int:
-    return int(os.environ.get(f"MINIWORLD_TDT_EPI_{name}", str(default)))
+    return int(os.environ.get(f"FOLDJET_ENGINE_TDT_EPI_{name}", str(default)))
 
 
 def _smem(bn: int, nst: int) -> int:

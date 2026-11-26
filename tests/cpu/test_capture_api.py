@@ -1,4 +1,4 @@
-"""R1 (FoldForge): the public capture / weight-cache API ``foldjet_engine.capture``.
+"""R1 (FoldJet): the public capture / weight-cache API ``foldjet_engine.capture``.
 
 - ``static_weights`` / ``static_inputs`` are the context managers of ``kernels._capture`` (same flags, restored on exit);
 - ``clear_weight_caches`` empties every registered store (a weight replaced without a version bump is picked up after it) and the
@@ -384,8 +384,8 @@ def _record_one(store, monkeypatch, x: torch.Tensor, owner: torch.nn.Module, kee
 
 
 def test_refresh_records_go_with_their_handle(monkeypatch):
-    """FoldForge 5I28 OpenDDE n = 16: a refresh record holds its input (``inputs``, the build closure) and its table. The records belong to
-    the ``static_inputs()`` handle: a caller that captures a new graph per item and drops the handle (FoldForge) leaves nothing that keeps the
+    """FoldJet 5I28 OpenDDE n = 16: a refresh record holds its input (``inputs``, the build closure) and its table. The records belong to
+    the ``static_inputs()`` handle: a caller that captures a new graph per item and drops the handle (FoldJet) leaves nothing that keeps the
     item alive once it drops the input itself (the table entry and the input's storage go at ``release_dead_inputs``); while the handle is
     kept a refresh rewrites the table in place; a refresh of a module whose records went with a dropped handle raises; a record made with no
     handle open (``set_static_inputs``) is held until released."""
@@ -443,7 +443,7 @@ def test_refresh_records_go_with_their_handle(monkeypatch):
 
 def test_lineage_replaces_the_entry_of_an_earlier_version(monkeypatch):
     """An input written in place (a new version) misses its old key; with ``lineage`` the new entry replaces the old one instead of both
-    staying while the input lives (FoldForge 5I28 OpenDDE n = 16: two versions' 24 token-DiT pair biases, 2 x 11.3 GiB). An entry a capture
+    staying while the input lives (FoldJet 5I28 OpenDDE n = 16: two versions' 24 token-DiT pair biases, 2 x 11.3 GiB). An entry a capture
     under ``static_inputs()`` read stays (that graph may replay it)."""
     store = _capture.weight_cache("test_capture_api.lineage")
     try:

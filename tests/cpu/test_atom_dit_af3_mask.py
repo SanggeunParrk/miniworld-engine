@@ -1,4 +1,4 @@
-"""FoldForge R13: ``AtomDiTOpenFold3(mask_form="af3")``, AlphaFold 3's mask form (a masked logit only where both the query and the key are
+"""FoldJet R13: ``AtomDiTOpenFold3(mask_form="af3")``, AlphaFold 3's mask form (a masked logit only where both the query and the key are
 padding), on the reference backend.
 
 - Below 128 real atoms a real query reads the padding keys of its window [0, 128): its rows equal a call in which every one of the 128 atoms

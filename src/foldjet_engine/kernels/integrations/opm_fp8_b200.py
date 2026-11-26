@@ -4,7 +4,7 @@ The H100 recipe of ``opm_fp8.py`` unchanged where it is not instruction specific
 |LN(x)_k| <= sqrt(d_msa - 1)|gamma_k| + |beta_k|, so no input can saturate the cast: no calibration, no guard), the product is the only e4m3 stage
 (O = sa sb A2q . BTq^T with fp32 accumulation, bf16 O), the count table / epilogue are the default's. What is B200 specific: A2 / BT come out of the B200
 bf16 prologue (``opm_sm100.cu`` / ``opm_wide_sm100.cu``, untouched) and one cast launch makes the e4m3 operands (``opm_fp8_b200.cu``); the product is
-``torch._scaled_mm`` (cuBLASLt, tcgen05 e4m3). Switch: the H100 module's ``opm_fp8.POLICY`` (``MINIWORLD_OPM_FP8=bound``), so ``fp8.enable`` already
+``torch._scaled_mm`` (cuBLASLt, tcgen05 e4m3). Switch: the H100 module's ``opm_fp8.POLICY`` (``FOLDJET_ENGINE_OPM_FP8=bound``), so ``fp8.enable`` already
 reaches it; depth gate ``MIN_S``.
 """
 
@@ -77,7 +77,7 @@ def _scales(args, device):
 
 
 def serves(args, n: int, s: int, save: bool):
-    """The scale entry when the route takes this ``opm_sm100._forward`` call (inference, bf16 activations, ``MINIWORLD_OPM_FP8=bound``, shape gate), else None."""
+    """The scale entry when the route takes this ``opm_sm100._forward`` call (inference, bf16 activations, ``FOLDJET_ENGINE_OPM_FP8=bound``, shape gate), else None."""
     wide = args[0].shape[-1] != 64 or args[6].shape[0] != 128
     if save or _h.POLICY != "bound" or args[0].dtype != torch.bfloat16 or not _gate(s, n, wide):
         return None
@@ -101,7 +101,7 @@ def _gate_fused(s: int, n: int) -> bool:
 
 
 def serves_fused(args, n: int, s: int):
-    """The scale entry when the fused e4m3 kernel (``opm_fused_infer_f8``) takes this ``opm_sm100._fused_forward`` call (inference, bf16, ``MINIWORLD_OPM_FP8=bound``, shape gate), else None."""
+    """The scale entry when the fused e4m3 kernel (``opm_fused_infer_f8``) takes this ``opm_sm100._fused_forward`` call (inference, bf16, ``FOLDJET_ENGINE_OPM_FP8=bound``, shape gate), else None."""
     if _h.POLICY != "bound" or args[0].dtype != torch.bfloat16 or not _gate_fused(s, n):
         return None
     c = _scales(args, args[0].device)
@@ -141,7 +141,7 @@ def _gate_chai(s: int, n: int) -> bool:
 
 
 def serves_chai(lnw, lnb, wl, wr, n: int, s: int):
-    """The scale entry when the grouped e4m3 route takes this ``chai_sm100`` inference call (``MINIWORLD_OPM_FP8=bound``, shape gate), else None."""
+    """The scale entry when the grouped e4m3 route takes this ``chai_sm100`` inference call (``FOLDJET_ENGINE_OPM_FP8=bound``, shape gate), else None."""
     if _h.POLICY != "bound" or not _gate_chai(s, n):
         return None
     key = wl.data_ptr()

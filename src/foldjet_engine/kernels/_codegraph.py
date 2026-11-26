@@ -39,6 +39,8 @@ import threading
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
+
 #: Bumped when the key material changes shape, so old bundles / caches stop matching instead of matching wrongly.
 KEY_SCHEME = 2
 

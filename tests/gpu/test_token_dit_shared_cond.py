@@ -1,6 +1,6 @@
 """The H100 token DiT training block with the conditioning shared by the samples (``kernels/integrations/token_dit_train._shared_cond``).
 
-FoldForge's ``TokenDiTStack`` hands every block ONE [L, d] conditioning expanded (stride 0) over the A samples. The block runs the
+FoldJet's ``TokenDiTStack`` hands every block ONE [L, d] conditioning expanded (stride 0) over the A samples. The block runs the
 conditioning GEMMs (G, Gg forward; dchat, dcg and the dWn, dWg weight gradients backward) on L rows instead of A L: the row kernels read row
 ``r % L`` of G / GG, and the backward sums dG / dGg over the samples (``sample_sum2``, fp32, sample order) before its GEMMs. The result is not
 bitwise the per-sample route's (the sum order differs) but stays inside bf16 rounding of it; it is deterministic.

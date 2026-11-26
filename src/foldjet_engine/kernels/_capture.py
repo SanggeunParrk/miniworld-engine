@@ -23,7 +23,7 @@ scoping is off and a capture serves from, and fills, the same caches as an eager
 Under it an in-place weight update after the capture is *not* seen by replays -- do not set it around a training graph, nor around a
 sampling run inside one. The benchmark harness sets it for ``mode=inference``.
 
-**Refreshing hoisted tables (FoldForge R26).** Under ``static_inputs()`` a capture is served the per-item tables (``lookup_inputs`` /
+**Refreshing hoisted tables (FoldJet R26).** Under ``static_inputs()`` a capture is served the per-item tables (``lookup_inputs`` /
 ``hoisted_table``) its warm-up made eagerly, and the graph reads those tensors at every replay. A caller that keeps the graph for the next
 item writes that item's inputs into the same input tensors and calls ``refresh_static_inputs``: every such read was recorded
 (``note_static_read``: the table, the call's ``build``, its inputs, the module that ran -- ``CALLER``, set by ``BackendModule.forward``) and
@@ -37,7 +37,7 @@ grouped conditioning weights, hoisted tables) at every replay, but the stores ke
 shape's warm-up and capture fill the same stores (an LRU of 4 conditioning chunks, count limits, scope prunes, a newer version). Every
 entry a capture is served is therefore held (``hold``) by each ``static_inputs()`` handle open at the capture, and goes with the handle
 (``release()`` or dropped); with no handle open, an eager-scope entry is held by the process until ``clear_weight_caches``. So: keep the
-handle for as long as the graph is replayed (FoldForge's per-shape sampler graph keeps it with the graph). A cache that serves a capture
+handle for as long as the graph is replayed (FoldJet's per-shape sampler graph keeps it with the graph). A cache that serves a capture
 from outside these helpers (``lookup`` / ``lookup_inputs`` / ``param_forms`` / ``hoisted_table``) calls ``hold`` itself.
 """
 
@@ -227,7 +227,7 @@ def lookup_inputs(store: dict, key, build, limit: int = 64, valid=None, alive=No
 
     ``lineage``: the key without the inputs' versions (their addresses, shapes, the weights...). A new entry of a lineage replaces the
     entries of its earlier versions: an input written in place has a new version, so the old key can never be hit again, yet its entry
-    stayed while the input lived (FoldForge 5I28 OpenDDE n = 16: a fold's pair conditioning refilled in place kept both versions' 24 token-DiT
+    stayed while the input lived (FoldJet 5I28 OpenDDE n = 16: a fold's pair conditioning refilled in place kept both versions' 24 token-DiT
     pair biases, 2 x 11.3 GiB). A graph that read the old entry reads it from its refresh record (which holds the table) after the refill,
     or is stale by the ``static_inputs()`` contract."""
     if _STATIC_INPUTS[0]:
@@ -304,7 +304,7 @@ def release_dead_inputs() -> int:
 
 
 #: (scope, (tag, ((pointer, version, dtype, shape), ...))) -> (weak references to the parameters, the forms). Also the Transition's ``Ws^T``
-#: (``transition/cuda/_weights.py``) and what FoldForge clears before it loads a model.
+#: (``transition/cuda/_weights.py``) and what FoldJet clears before it loads a model.
 _FORMS: dict = {}
 
 
@@ -458,7 +458,7 @@ def param_forms(tag, params, build, *, inputs_scope: bool = False, capture_reads
     ``static_weights()`` -- for the inference-only forms (grad off), the contract ``kernels._tf32.tf32_cached`` has for the portable kernels;
     such an entry is then held for good. ``tag`` names the form (any hashable)."""
     if torch.compiler.is_compiling():
-        # A cache keyed on tensor identity cannot be traced (Dynamo died on the weak references: FoldForge's compiled Protenix-v2
+        # A cache keyed on tensor identity cannot be traced (Dynamo died on the weak references: FoldJet's compiled Protenix-v2
         # sampler, AdaLN inference). Traced, the forms are computed in the graph; the opaque ops call this at run time and cache.
         return build()
     params = tuple(params)
@@ -514,7 +514,7 @@ def hoisted_table(store: dict, tensor: torch.Tensor, key, build, limit: int = 64
     return entry[2]
 
 
-# ------------------------------------------------------------------------------------------- refreshing hoisted tables (FoldForge R26)
+# ------------------------------------------------------------------------------------------- refreshing hoisted tables (FoldJet R26)
 class StaleStaticInputs(RuntimeError):
     """A refresh cannot rewrite a recorded hoisted table: the weights it was made from changed (version / object), its input's layout
     changed (shape, strides, dtype, device, address), the capture that read it was not under ``static_weights()``, or a rebuilt table no
@@ -557,7 +557,7 @@ def _params_of(owner) -> tuple:
 #: (id(store), key) -> a weak reference to the ``_Read`` of every hoisted table a capture under ``static_inputs()`` read from the eager cache
 #: (so a replay reads it as it is then, without its producing kernels). The record itself is held by the ``static_inputs()`` handles that were
 #: open when it was made (``StaticTables``), or by ``_UNOWNED`` when none was (``set_static_inputs`` alone). A record holds its table, its
-#: inputs and the build closure: held globally, it kept every item's tables alive for good -- FoldForge, which does not refresh, captures one
+#: inputs and the build closure: held globally, it kept every item's tables alive for good -- FoldJet, which does not refresh, captures one
 #: sampler graph per fold, and the records kept each finished fold's pair conditioning (3.75 GiB) and 48 token-DiT pair biases (22.6 GiB)
 #: through the next fold's trunk (5I28 OpenDDE n = 16: out of memory at the structural-token refiner, 2026-11-13). Registered:
 #: ``clear_weight_caches`` drops the records with the stores.

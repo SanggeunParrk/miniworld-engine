@@ -1,7 +1,7 @@
 """Large-magnitude inference on the sm_80 family (A100, RTX 5090): every requirements module with a ``cuda`` backend, fed activations far beyond the usual N(0, 1).
 
 Why: the judge and the unit tests draw random NORMAL inputs, so an intermediate that is stored or accumulated in a type with less range than bf16 (fp16: 65504;
-fp8; an fp16 accumulator initialised with the residual) is invisible to them.  AF3's MSA activations reach |x| ~ 65536 (FoldForge 5I28 n=1 on the 5090: the one-kernel
+fp8; an fp16 accumulator initialised with the residual) is invisible to them.  AF3's MSA activations reach |x| ~ 65536 (FoldJet 5I28 n=1 on the 5090: the one-kernel
 bf16 Transition's f16 accumulator started at x and went to -inf: 'non-finite AF3 coordinates', engine 3.0.5).  This file is the audit's regression net.
 
 Per case (the requirements' eval cases of ``measure/config.py``: module x variant x dtype, smallest length / depth / samples; ``MW_LM_LENGTHS=a,b`` replaces the length sweep)
@@ -91,7 +91,7 @@ def _selected() -> list[cfgmod.Case]:
     for c in cfgmod.cases(cfg):
         if "cuda" in c.cls.backends and c.module not in NOT_ACTIVATIONS:
             seen.setdefault((c.module, json.dumps(c.kwargs, sort_keys=True, default=str), c.dtype, c.stream, c.length, c.depth), c)
-    # the requirements measure bf16 models as ``master`` (fp32 weights under autocast); a bf16 model (``module.bfloat16()``, no autocast: FoldForge's AF3 run) takes other kernel
+    # the requirements measure bf16 models as ``master`` (fp32 weights under autocast); a bf16 model (``module.bfloat16()``, no autocast: FoldJet's AF3 run) takes other kernel
     # routes (the 5I28 Transition failure was one) and is not a requirements dtype: every ``master`` case also runs as ``bfloat16``
     for key, c in list(seen.items()):
         if c.dtype == "master" and "fp32" not in c.stream:  # (an fp32-conditioning stream mixes dtypes: no bf16 model twin)

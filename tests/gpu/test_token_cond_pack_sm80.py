@@ -52,9 +52,9 @@ def test_pack_matches_the_unpacked_path_in_accuracy(d_cond: int, L: int, samples
         pytest.skip(f"not served: {m.unsupported(**kw)}")
     assert token_cond_sm80.serves(m, kw["single"], kw["cond"], False)
     with torch.no_grad():
-        monkeypatch.setenv("MINIWORLD_TOKEN_COND_PACK", "0")
+        monkeypatch.setenv("FOLDJET_ENGINE_TOKEN_COND_PACK", "0")
         old = m(**kw).clone()
-        monkeypatch.setenv("MINIWORLD_TOKEN_COND_PACK", "1")
+        monkeypatch.setenv("FOLDJET_ENGINE_TOKEN_COND_PACK", "1")
         new = m(**kw).clone()
         refkw = {k: (v.float() if isinstance(v, torch.Tensor) and v.is_floating_point() else v) for k, v in kw.items()}
         want = ref(**refkw)
@@ -70,13 +70,13 @@ def test_pack_reads_a_changed_weight(monkeypatch: pytest.MonkeyPatch) -> None:
     inp = m.make_inputs(length=128, samples=5, depth=None, dtype=torch.bfloat16, device="cuda", generator=torch.Generator(device="cuda").manual_seed(1))
     kw = dict(inp, cond=inp["cond"][:1].expand_as(inp["cond"]), mask=torch.ones(1, 128, dtype=torch.bool, device="cuda"))
     with torch.no_grad():
-        monkeypatch.setenv("MINIWORLD_TOKEN_COND_PACK", "1")
+        monkeypatch.setenv("FOLDJET_ENGINE_TOKEN_COND_PACK", "1")
         a = m(**kw).clone()
         m.transition.to_scale.bias.mul_(0.5)  # the gate of the transition, in place
         b = m(**kw).clone()
         m.attention.ada_ln_in.ln_cond.weight.mul_(1.5)
         c = m(**kw).clone()
-        monkeypatch.setenv("MINIWORLD_TOKEN_COND_PACK", "0")
+        monkeypatch.setenv("FOLDJET_ENGINE_TOKEN_COND_PACK", "0")
         c0 = m(**kw).clone()
     assert not torch.equal(a, b) and not torch.equal(b, c)
     assert _rms(c, c0) <= 0.05 * float(c0.double().pow(2).mean().sqrt()) + 1e-6

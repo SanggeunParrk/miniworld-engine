@@ -2,7 +2,7 @@
 
 A padded sample (tokens ``[0, n)`` live, the tail masked) has a / b planes that are zero past ``n`` in every row and column (K1 masks
 them by ``m[i] & m[k]``), so its contraction past ``n`` is exact zeros. The kernel reads the live extents on the device (a CUDA graph
-re-reads them on every replay: FoldForge refreshes the mask per fold) and runs the K loop only to the live ``k`` (rounded up to the K
+re-reads them on every replay: FoldJet refreshes the mask per fold) and runs the K loop only to the live ``k`` (rounded up to the K
 tile), writing a tile past the live rows / columns as the zeros the full product holds. With every token live it is the full product.
 
 It replaces cuBLAS only on the cells ``CELLS`` lists, where it measured at least as fast as cuBLAS on UNPADDED inputs (interleaved

@@ -40,7 +40,7 @@ the package root; this module is the public home of what a caller that captures 
 ``weight_caches()``
     The registered stores by name (inspection; a kernel module not imported yet has registered nothing and filled nothing).
 
-**One graph per shape, many items (FoldForge R26).** A sampler graph captured under ``static_weights()`` + ``static_inputs()`` reads the
+**One graph per shape, many items (FoldJet R26).** A sampler graph captured under ``static_weights()`` + ``static_inputs()`` reads the
 hoisted per-item tables (the token DiT's pair bias, the atom blocks' conditioning tables / windowed pair bias / slid-edge tables, the
 bias-only block's attention weights) from the eager cache: they were made in the warm-up and the replay runs none of their kernels. To
 serve the next item with the SAME graph::
@@ -79,7 +79,7 @@ caches. Every entry a capture reads is held by the ``static_inputs()`` handle op
 nothing a graph reads is freed while its handle lives, whatever is captured, evicted or ``torch.cuda.empty_cache()``-d meanwhile. The holds
 go with the handle -- ``tables.release()`` or the handle dropped -- so keep it exactly as long as the graph (a per-shape cache entry keeps
 both; a graph per item keeps both for the item). A capture with no ``static_inputs()`` handle open (``static_weights()`` alone) holds the
-eager entries it reads process-wide until ``clear_weight_caches()``. A caller needs no hold of its own (FoldForge's ``hold_new`` snapshot
+eager entries it reads process-wide until ``clear_weight_caches()``. A caller needs no hold of its own (FoldJet's ``hold_new`` snapshot
 of ``weight_caches()``)::
 
     with static_weights(), static_inputs() as tables:      # shape 1

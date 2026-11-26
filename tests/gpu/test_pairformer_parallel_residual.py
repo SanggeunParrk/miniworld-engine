@@ -130,7 +130,7 @@ def test_other_backends_keep_the_reference_statements(monkeypatch):
 
 
 def test_per_sub_module_backends_fuse_too(monkeypatch):
-    """FoldForge picks the backend per op: the block stays on ``"pytorch"``, its sub-modules run ``cuda``; the fused sum runs as for a block set
+    """FoldJet picks the backend per op: the block stays on ``"pytorch"``, its sub-modules run ``cuda``; the fused sum runs as for a block set
     to ``cuda`` (bitwise the same output)."""
     m = _block(True).set_backend("cuda").eval()
     pair, mask, s = _inputs(True)

@@ -1,6 +1,6 @@
 """Attention kernels skip what a padded key mask makes dead (``kernels._key_len``, ``augmented_attention/cuda/key_len.cuh``).
 
-A padded tail (FoldForge buckets token / atom counts: mask True for the first n) is masked in every query row; after a row's live max its
+A padded tail (FoldJet buckets token / atom counts: mask True for the first n) is masked in every query row; after a row's live max its
 exponentials are exact zeros, so a core that stops its key loop at the tile holding the last attended key writes the same bits; a pair-bias
 tile whose keys are all masked is written as the mask value without reading the pair; a window / tile of atoms with no valid key writes
 its zero rows without computing them.
@@ -141,7 +141,7 @@ def test_token_dit_skip_bitwise(key: str, dtype: str, L: int, monkeypatch: pytes
 
 @pytest.mark.skipif(not _h100(), reason="H100 (sm_90) static input refresh")
 def test_refresh_with_another_live_count() -> None:
-    """FoldForge R26 with the key skip: one captured token stack step, folds whose masks drop different numbers of key blocks."""
+    """FoldJet R26 with the key skip: one captured token stack step, folds whose masks drop different numbers of key blocks."""
     from foldjet_engine.capture import refresh_static_inputs, release_static_inputs, static_inputs, static_weights
     from foldjet_engine.modules import TokenDiTStack
 

@@ -1,6 +1,6 @@
 # H100 (sm90a) FP8 Transition digest (engine 3.0.3 docs/fp8.md "Transition forward", "D 256", "token counts", "D 64"; sources fp8_sm90a.py, transition_fp8_fwd_sm90a.cu, transition_fp8_d256_sm90a.cu/.cuh, wide/fp8_bind.cu)
 
-## What is e4m3 per width (inference forward, bf16 x [..,D], n 2/4; off by default, MINIWORLD_TRANSITION_FP8=calib; training, D64, D768, fp32 activations stay default)
+## What is e4m3 per width (inference forward, bf16 x [..,D], n 2/4; off by default, FOLDJET_ENGINE_TRANSITION_FP8=calib; training, D64, D768, fp32 activations stay default)
 | width | kernel (H100) | e4m3 operands | h path | notes |
 |---|---|---|---|---|
 | D128 | the 2.5.12 fused D128 inference kernel (LNFRAG/XFIRST/DECOUPLE/SKEW), both GEMMs `wgmma m64n128k32 .e4m3` | xn (A, quantised in registers from the fp32 LayerNorm, no bf16 rounding first), [Wa;Wb] and Ws (B) | the fp32 C fragment of the expand IS the k32 e4m3 A fragment of the squeeze after a fixed K permutation (cols {2t,2t+1,8+2t,9+2t} of each 16-block) -> weights packed in that K order, no shuffle; h never leaves registers | 24 KB weight slots, 4 in the ring; F8G1/F8G2 give partial placements |

@@ -25,6 +25,8 @@ import os
 
 import torch
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
+
 #: pair widths the glue LayerNorm takes (C % 8 == 0, C <= 512)
 MAX_C = 512
 
@@ -65,11 +67,11 @@ def _b200() -> bool:
 
 #: B200: the ending node's per-head contractions (forward O_e, backward dV_e and dP_e) and the softmax backward's row dot on the
 #: sm_100a kernels of ``b200_bidir.bo`` -- one launch for every head instead of a cuBLAS batched GEMM (+ a torch sum) per head.
-#: MINIWORLD_BIDIR_B200_NATIVE=0 switches back to the torch ops (H100 / A100 / RTX 5090 never take this path).
-B200_NATIVE = os.environ.get("MINIWORLD_BIDIR_B200_NATIVE", "1") != "0"
+#: FOLDJET_ENGINE_BIDIR_B200_NATIVE=0 switches back to the torch ops (H100 / A100 / RTX 5090 never take this path).
+B200_NATIVE = os.environ.get("FOLDJET_ENGINE_BIDIR_B200_NATIVE", "1") != "0"
 
 #: (S90 training, cuda:b200_sm100 61) the single-direction (use_self_attention=False) LayerNorm backward's input gradient dyln = dc^T W written as bf16 instead of fp32 (2 x 67 MB less traffic at L512): row 188 training step -2.4 .. -3.0 % (L256 199.7 -> 193.7 us, L512 568.7 -> 553.6, L768 1201.1 -> 1164.7, starting; ending -2.5 .. -2.7 %); the bf16 dyln rounds the cotangent once before the LayerNorm backward (accuracy: row 188 training, 8 cases, no RED, GREEN / YELLOW as before).
-DYLN_BF16 = os.environ.get("MINIWORLD_BIDIR_B200_DYLN_BF16", "1") != "0"
+DYLN_BF16 = os.environ.get("FOLDJET_ENGINE_BIDIR_B200_DYLN_BF16", "1") != "0"
 
 
 #: the native ending GEMMs up to this length: they win at L128 (one launch for 4 heads instead of 4-8) and tie at L256; from L384 on
@@ -122,16 +124,16 @@ def _ext():
 
 #: (N1, cuda:b200_sm100 71 / Bidirectional 5) the bias-only paths' LayerNorm forward / backward and fused gate backward (C = 128, K = 128) on the B200 kernels of
 #: ``b200_sources/lnbwd_sm100.cu``: x / dyln / dy of a row in flight together and a row step ahead, 2 CTAs an SM (fewer partial rows for the
-#: column sum). forward y / mean / rstd and dx bitwise equal, d gamma / d beta fp32 sums regrouped. MINIWORLD_BIDIR_B200_LNBWD=0 turns it off.
-B200_LNBWD = os.environ.get("MINIWORLD_BIDIR_B200_LNBWD", "1") != "0"
+#: column sum). forward y / mean / rstd and dx bitwise equal, d gamma / d beta fp32 sums regrouped. FOLDJET_ENGINE_BIDIR_B200_LNBWD=0 turns it off.
+B200_LNBWD = os.environ.get("FOLDJET_ENGINE_BIDIR_B200_LNBWD", "1") != "0"
 
 
 #: (N1) the single-direction training backward's two weight-gradient GEMMs (dWo = dt^T u, dW = dc^T y: tall-K split-K GEMMs of 9-12 us at L128, 36 us at L512
 #: with their reduce) off the main chain as branches of the captured graph (they read tensors the chain already has and nothing reads their results before the
 #: end): the dWo GEMM beside the gate backward / core GEMMs, the dW GEMM beside the dyln GEMM and the LayerNorm backward. One sample (B = 1), B200, graph capture only.
-#: MINIWORLD_BIDIR_B200_SIDE=0 turns it off.
-B200_SIDE = int(os.environ.get("MINIWORLD_BIDIR_B200_SIDE", "3"))   # bit 0: the dWo branch, bit 1: the dW branch
-B200_SIDE_MAX_L = int(os.environ.get("MINIWORLD_BIDIR_B200_SIDE_MAX_L", "256"))   # the dWo branch only up to this length (beyond it the core GEMMs fill the SMs: it slows the chain); the dW branch at every length
+#: FOLDJET_ENGINE_BIDIR_B200_SIDE=0 turns it off.
+B200_SIDE = int(os.environ.get("FOLDJET_ENGINE_BIDIR_B200_SIDE", "3"))   # bit 0: the dWo branch, bit 1: the dW branch
+B200_SIDE_MAX_L = int(os.environ.get("FOLDJET_ENGINE_BIDIR_B200_SIDE_MAX_L", "256"))   # the dWo branch only up to this length (beyond it the core GEMMs fill the SMs: it slows the chain); the dW branch at every length
 
 
 def _ln_fwd(g, x, lnw, lnb, eps, L):
@@ -157,8 +159,8 @@ def _ln_bwd(g, bo, dyln, x, dy, lnw, mean, rstd, L):
 
 
 #: (N1, cuda:b200_sm100 71 / Bidirectional 5) the tall-K fp32-output contractions of the bias-only backward (dWo, dW, dP: K = 16384 .. L L) on tuned cublasLt
-#: algorithms (``b200_sources/ltmm_sm100.cu``, chosen per shape by a deterministic / accurate timing sweep at the first eager call). MINIWORLD_BIDIR_B200_LT=0 turns it off.
-B200_LT = os.environ.get("MINIWORLD_BIDIR_B200_LT", "1") != "0"
+#: algorithms (``b200_sources/ltmm_sm100.cu``, chosen per shape by a deterministic / accurate timing sweep at the first eager call). FOLDJET_ENGINE_BIDIR_B200_LT=0 turns it off.
+B200_LT = os.environ.get("FOLDJET_ENGINE_BIDIR_B200_LT", "1") != "0"
 
 
 def _lt():
@@ -294,8 +296,8 @@ def _probs(bias: torch.Tensor, keep: torch.Tensor | None, H: int, L: int) -> tor
 #: The RTX 5090 (sm_120a): the plane contractions on CUTLASS tensor-op tiles (``pair_weighted_averaging.cuda.gemm_sm120``) instead of cuBLAS, whose heuristic picks 32 x 32 WMMA
 #: tiles there for these shapes (L 256, 4 x 32-channel heads: the P v contraction 51 -> 41 us, the out-projection with its residual 63 -> 43 us; L 512: 348 -> 209, 248 -> 137 us)
 #: and copies the residual into the output first (addmm). The same accumulation (bf16 products, fp32 sums rounded once): within bf16 rounding of the cuBLAS bits.
-#: From L 256 (at L 128 the call is the same speed). MINIWORLD_BIDIR_SM120_GEMM=0 switches it off (the A100 and H100 never take it).
-SM120_GEMM = os.environ.get("MINIWORLD_BIDIR_SM120_GEMM", "1") != "0"
+#: From L 256 (at L 128 the call is the same speed). FOLDJET_ENGINE_BIDIR_SM120_GEMM=0 switches it off (the A100 and H100 never take it).
+SM120_GEMM = os.environ.get("FOLDJET_ENGINE_BIDIR_SM120_GEMM", "1") != "0"
 _PV_CFG, _OUT_CFG = 0, 2  # gemm_sm120.CFGS: 128 x 128 x 32 (P v); 256 x 128 x 32 (the out-projection, N = d_pair 128)
 
 
@@ -684,9 +686,9 @@ class _SingleFn(torch.autograd.Function):
 #: B200 (S90), inference at one 128-token tile (L <= 128), d_pair = d_hidden = 128 with 4 heads: the bias-only update is the self-attention
 #: update with q = k = 0 (the logits are the bias alone, softmax(b_jk) is the same for every row i), so it runs on the fused one-kernel
 #: L128 path of ``b200_triattn.fused_forward`` with zero Wq / Wk (one launch instead of the eight-launch plane chain; the redundant
-#: q.k exponentials are 1.8 us of MUFU at L128). MINIWORLD_TRIATTN_B200_BO_L128=0 switches it off. Above one tile the L^3 exponentials
+#: q.k exponentials are 1.8 us of MUFU at L128). FOLDJET_ENGINE_TRIATTN_B200_BO_L128=0 switches it off. Above one tile the L^3 exponentials
 #: and the extra q / k stores are not free: the chain stays.
-B200_BO_L128 = os.environ.get("MINIWORLD_TRIATTN_B200_BO_L128", "1") != "0"
+B200_BO_L128 = os.environ.get("FOLDJET_ENGINE_TRIATTN_B200_BO_L128", "1") != "0"
 _ZERO_QK: dict = {}
 
 

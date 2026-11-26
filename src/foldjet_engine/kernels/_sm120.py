@@ -2,7 +2,7 @@
 
 The A100 kernels (``mma.sync`` / ``ldmatrix`` / ``cp.async``) run unchanged on sm_120a, which has the same warp-level tensor-core
 instructions (it has no ``wgmma`` / ``tcgen05``). A builder of an sm_80 extension imports :func:`sm80_load_extension` as its
-``load_extension``: on an sm_120 device (or with ``MINIWORLD_ENGINE_BUILD_ARCH=sm120``, for a GPU-less prebuild) it compiles the
+``load_extension``: on an sm_120 device (or with ``FOLDJET_ENGINE_BUILD_ARCH=sm120``, for a GPU-less prebuild) it compiles the
 same sources for ``sm_120a`` under the extension name ``<name>_sm120`` (``-DMWE_SM120`` defined, for the few size guards the 99 KB
 shared-memory limit of the card needs); everywhere else it is ``_nvcc.load_extension`` itself, so the sm_80 build and its key are
 unchanged.
@@ -16,9 +16,10 @@ from typing import Any
 
 import torch
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
 from foldjet_engine.kernels import _nvcc
 
-ENV = "MINIWORLD_ENGINE_BUILD_ARCH"
+ENV = "FOLDJET_ENGINE_BUILD_ARCH"
 #: RTX 5090: the opt-in dynamic shared memory per block (101376 B = 99 KB) and the SM count
 SMEM_MAX = 101376
 SMS = 170
@@ -47,7 +48,7 @@ def is_sm120(device: torch.device | None = None) -> bool:
 
 
 def building_sm120() -> bool:
-    """Whether sm_80 builders compile for sm_120a now: ``MINIWORLD_ENGINE_BUILD_ARCH`` (``sm120`` / ``sm80``) if set, else the current device."""
+    """Whether sm_80 builders compile for sm_120a now: ``FOLDJET_ENGINE_BUILD_ARCH`` (``sm120`` / ``sm80``) if set, else the current device."""
     forced = os.environ.get(ENV, "").lower().removeprefix("sm").removeprefix("_").rstrip("a")
     if forced:
         return forced == "120"
@@ -55,7 +56,7 @@ def building_sm120() -> bool:
 
 
 def building_sm100() -> bool:
-    """Whether sm_80 builders compile for sm_100a now (the B200, card ``b200_sm100``): ``MINIWORLD_ENGINE_BUILD_ARCH=sm100`` if set, else
+    """Whether sm_80 builders compile for sm_100a now (the B200, card ``b200_sm100``): ``FOLDJET_ENGINE_BUILD_ARCH=sm100`` if set, else
     the current device is capability 10.0. The A100 sources run unchanged on sm_100a (``mma.sync`` / ``ldmatrix`` / ``cp.async`` and
     the 227 KB shared memory of the H100); the extension name gets ``_sm100`` and ``-DMWE_SM100`` is defined. Nothing else changes."""
     forced = os.environ.get(ENV, "").lower().removeprefix("sm").removeprefix("_").rstrip("a")

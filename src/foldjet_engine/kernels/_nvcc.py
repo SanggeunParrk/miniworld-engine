@@ -28,6 +28,8 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, NamedTuple
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
+
 
 @functools.lru_cache(maxsize=1)
 def nvcc_path() -> str | None:
@@ -186,7 +188,7 @@ __global__ void k(float* p) { p[0] = 1.0f; }
 
 #: A release build sets this to the one host compiler every artifact is built with (and CXX to the same, which
 #: torch uses to compile and link the C++ side): the libstdc++ it links decides which systems can load the result.
-HOST_CXX_ENV = "MINIWORLD_ENGINE_HOST_CXX"
+HOST_CXX_ENV = "FOLDJET_ENGINE_HOST_CXX"
 
 #: g++ installs to try, best first. The environment's own compiler comes first so a working
 #: setup needs no override; the cluster's module tree is next, because this cluster ships GCC 12.4
@@ -304,7 +306,7 @@ def real_host_flags() -> list[str]:
 # failure name the variable to set rather than emitting a missing-header error.
 # ---------------------------------------------------------------------------------------------
 
-MATHDX_ENV_VARS = ("MINIWORLD_MATHDX_HOME", "MATHDX_HOME", "NVIDIA_MATHDX_HOME")
+MATHDX_ENV_VARS = ("FOLDJET_ENGINE_MATHDX_HOME", "MATHDX_HOME", "NVIDIA_MATHDX_HOME")
 
 #: Present in every mathdx distribution; used to tell a real root from a plausible directory.
 _MATHDX_SENTINEL = Path("include") / "cublasdx.hpp"
@@ -421,9 +423,15 @@ _BUILT_GUARD = threading.Lock()
 
 
 def engine_jit_root() -> Path:
-    """Directory the JIT-built kernels are cached in: $XDG_CACHE_HOME (else ~/.cache) / miniworld_engine_jit."""
+    """Directory the JIT-built kernels are cached in: $XDG_CACHE_HOME (else ~/.cache) / foldjet_engine_jit.
+
+    A cache under the pre-1.0.0 name ``miniworld_engine_jit`` keeps being used while no ``foldjet_engine_jit`` exists (a warm
+    cache is not rebuilt for the rename).
+    """
     xdg = os.environ.get("XDG_CACHE_HOME")
-    return (Path(xdg).expanduser() if xdg else Path.home() / ".cache") / "miniworld_engine_jit"
+    base = Path(xdg).expanduser() if xdg else Path.home() / ".cache"
+    new, old = base / "foldjet_engine_jit", base / "miniworld_engine_jit"
+    return old if old.is_dir() and not new.exists() else new
 
 
 #: Prebuilt artifacts shipped inside the package: the same layout as :func:`engine_jit_root` (a copy of the prebuilt part
@@ -890,7 +898,7 @@ def _ext_key(name: str, kwargs: dict, sources: list[str] | None, inline: bool) -
 def _pinned_cutlass(kwargs: dict) -> dict | None:
     """``kwargs`` with every CUTLASS include directory of another release than ``_codegraph.CUTLASS_PINNED`` replaced by
     ``CUTLASS_STANDIN`` (keyed as the pinned release), or None when there is none: the key the prebuilt artifact has. A
-    CUTLASS_PATH to another checkout (4.8.0 in FoldForge's runs, 2026-10-30) otherwise re-keyed every CUTLASS extension and
+    CUTLASS_PATH to another checkout (4.8.0 in FoldJet's runs, 2026-10-30) otherwise re-keyed every CUTLASS extension and
     compiled the prebuilt ones again on the first call."""
     from foldjet_engine.kernels import _codegraph as cg
 

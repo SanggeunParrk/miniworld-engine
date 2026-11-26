@@ -148,7 +148,7 @@ def _uni_infer(x_n, WLt, WLgt, WRt, WRgt, Wgt, Wp, ln_out_w, ln_out_b, eps, outg
     rf = right.reshape(H, L, L)
     tri = _contract(lf, rf, outgoing)  # (H, L, L)
     # the projections are dead once contracted: freed before the back half allocates the output (peak x_n + left + right + tri, not
-    # + y; FoldForge 5I28 OpenDDE n = 16 on A100: the refiner's second TriMul at 3968 structural tokens, d_pair 384)
+    # + y; FoldJet 5I28 OpenDDE n = 16 on A100: the refiner's second TriMul at 3968 structural tokens, d_pair 384)
     del left, right, lf, rf
     # Fused back-half: LN_out + proj-gemm + gate-gemm + mul in ONE kernel (``trimul_back_triton``),
     # which replaces the 2-kernel ``_te_forward`` (LN_out+proj) + ``gate_elem_triton`` (gate+mul) split:
@@ -210,7 +210,7 @@ def trimul_triton(
     """Single-direction Triton trimul. Returns (B, L, L, d_pair): LN_in (triton, row_scale
     mask), then a forward-only path for inference (``_uni_infer``) and the merged
     autograd Function for training (``_UniBackHalfTriton``). All-triton/cuBLAS;
-    d_hidden may differ from d_pair (Protenix / FoldForge template TriMul: pair 64, hidden 128): the front projects d_pair -> d_hidden,
+    d_hidden may differ from d_pair (Protenix / FoldJet template TriMul: pair 64, hidden 128): the front projects d_pair -> d_hidden,
     LN_out and the contraction run at d_hidden, ``to_out`` projects back to d_pair, the output gate stays d_pair -> d_pair.
 
     B==1 by design (inherited from the shared bidir front + bdll layout). B>1 was implemented

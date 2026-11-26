@@ -31,6 +31,7 @@ from collections.abc import Callable, Iterable
 from types import SimpleNamespace
 from typing import cast
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
 from foldjet_engine.kernels import _nvcc, _prebuild
 from foldjet_engine.kernels._prebuild import KERNELS, Target, family_rows, log
 

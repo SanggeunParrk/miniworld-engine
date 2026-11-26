@@ -291,7 +291,7 @@ class PoolAtoms(BackendModule):
 
     ``forward(x, idx, gather_mask, atom_mask)``: ``x`` ``[S, Q, C]`` -- atom features of ``S`` samples (the queries layout, flattened); ``idx`` ``[T, A]`` int --
     the atoms of each of ``T`` tokens (the token-atoms layout), ``gather_mask`` / ``atom_mask`` ``[T, A]`` -- the gather's and the atoms' masks (bool). Returns
-    ``[S, T, C]`` in ``x``'s dtype (bf16; the sums run in fp32, fp64 for the gold run). Differentiable in ``x`` on every backend (FoldForge R17: training through
+    ``[S, T, C]`` in ``x``'s dtype (bf16; the sums run in fp32, fp64 for the gold run). Differentiable in ``x`` on every backend (FoldJet R17: training through
     the encoder pooling): the kernels' backward is a gather over the slots sorted by atom row (fp32, fixed order, no atomics) and differentiates ``x`` only (a mask
     that requires grad is refused).
 
@@ -357,7 +357,7 @@ class PoolAtoms(BackendModule):
         return None
 
     def _supports_cuda(self, x, idx, gather_mask, atom_mask) -> str | None:
-        # fp32 atom features (the FoldForge training step runs the atom encoder in fp32): the sm_80 / sm_120a build has fp32 pooling kernels (sampler_ops_f32_sm80.cu)
+        # fp32 atom features (the FoldJet training step runs the atom encoder in fp32): the sm_80 / sm_120a build has fp32 pooling kernels (sampler_ops_f32_sm80.cu)
         why = self._supports_kernels(x, idx, gather_mask, atom_mask, fp32=_sm80_class(x.device))
         if why is None:
             c = x.shape[-1]

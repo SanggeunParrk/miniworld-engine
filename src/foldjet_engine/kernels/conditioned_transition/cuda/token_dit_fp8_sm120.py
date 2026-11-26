@@ -1,8 +1,8 @@
 """OPT-IN e4m3 placements of the RTX 5090 (sm_120a) token DiT inference block (docs/fp8.md "RTX 5090", token DiT): the ``token_dit`` slot of
 ``fp8.SM120_ROUTES``, the same interface and switch as the H100 module ``token_dit_fp8`` (``PLACES``, ``STATS``, ``MIN_ROWS``, ``_parse``)::
 
-    MINIWORLD_TOKEN_DIT_FP8=expand          # (MINIWORLD_FP8=safe / engine-fp8 set this) any of qkvg, expand, out, squeeze; "1" = qkvg,expand; "all"
-    MINIWORLD_TOKEN_DIT_FP8_MIN_ROWS=0      # one row gate for every placement (default: MIN_ROWS_PER; fewer step rows A B L keep bf16)
+    FOLDJET_ENGINE_TOKEN_DIT_FP8=expand          # (FOLDJET_ENGINE_FP8=safe / engine-fp8 set this) any of qkvg, expand, out, squeeze; "1" = qkvg,expand; "all"
+    FOLDJET_ENGINE_TOKEN_DIT_FP8_MIN_ROWS=0      # one row gate for every placement (default: MIN_ROWS_PER; fewer step rows A B L keep bf16)
 
 The 5090 token DiT runs the sm_80 kernels built for sm_120a: the attention on ``integrations/augattn_sm80`` (AdaLN, the qkvg GEMM, the pair bias,
 the mma.sync core, the out projection) and the transition on ``integrations/conditioned_transition_sm80`` (AdaLN rows, the expand GEMM, SwiGLU,
@@ -24,6 +24,8 @@ weight version): nothing saturates, no calibration, no overflow guard (``fp8.che
 
 from __future__ import annotations
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
+
 import functools
 import os
 from pathlib import Path
@@ -39,7 +41,7 @@ E4M3 = torch.float8_e4m3fn
 BF = torch.bfloat16
 
 #: the e4m3 placements in force (empty: the default bf16 route); the H100 module's variable
-PLACES: frozenset[str] = _parse(_fp8_env("MINIWORLD_TOKEN_DIT_FP8", "") or "")
+PLACES: frozenset[str] = _parse(_fp8_env("FOLDJET_ENGINE_TOKEN_DIT_FP8", "") or "")
 #: route call counters (``fp8.route_stats()["token_dit"]``, plain ints at Python call time): ``calls`` = token transition calls that took an
 #: e4m3 placement (expand / squeeze), ``declined`` = token transition calls with a transition placement in ``PLACES`` sent to the bf16 route
 #: (fp32, width, row gate); per placement the calls that took it (``qkvg`` / ``out``: attention calls).
@@ -49,8 +51,8 @@ STATS = {"calls": 0, "declined": 0, "expand": 0, "qkvg": 0, "out": 0, "squeeze":
 MIN_ROWS_PER: dict[str, int] = {"qkvg": 640, "expand": 640, "out": 1280, "squeeze": 1280}
 #: Boltz-2's up-gated expand (its own GEMM shape [a | b | u])
 MIN_ROWS_UP = 640
-#: one override for every placement (``MINIWORLD_TOKEN_DIT_FP8_MIN_ROWS``; 0 = no gate), None: ``MIN_ROWS_PER``
-MIN_ROWS: int | None = int(os.environ["MINIWORLD_TOKEN_DIT_FP8_MIN_ROWS"]) if os.environ.get("MINIWORLD_TOKEN_DIT_FP8_MIN_ROWS") else None
+#: one override for every placement (``FOLDJET_ENGINE_TOKEN_DIT_FP8_MIN_ROWS``; 0 = no gate), None: ``MIN_ROWS_PER``
+MIN_ROWS: int | None = int(os.environ["FOLDJET_ENGINE_TOKEN_DIT_FP8_MIN_ROWS"]) if os.environ.get("FOLDJET_ENGINE_TOKEN_DIT_FP8_MIN_ROWS") else None
 #: the widths built (the token DiT's d = 768; its hidden 1536)
 WIDTHS = (768,)
 

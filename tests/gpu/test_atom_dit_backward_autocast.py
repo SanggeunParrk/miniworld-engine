@@ -1,10 +1,10 @@
-"""R20 (FoldForge): the atom-DiT block backward called inside an autocast region (FoldForge's training step runs ``.backward()`` under
+"""R20 (FoldJet): the atom-DiT block backward called inside an autocast region (FoldJet's training step runs ``.backward()`` under
 its bf16 autocast; autograd carries the caller's autocast state into the backward) must give the gradients of a backward outside it.
 
-FoldForge's Protenix v1 pattern: 8 noisy samples [8, 1, 1024, 128], the conditioning one row set expanded over the samples (stride 0), one
+FoldJet's Protenix v1 pattern: 8 noisy samples [8, 1, 1024, 128], the conditioning one row set expanded over the samples (stride 0), one
 pair [1, 32, 32, 128, 16], the slid key window, 610 real atoms first in the key mask, fp32 master parameters under bf16 autocast. Before the
 fix the H100 weight-gradient GEMMs ran bf16 under the caller's autocast and ``finalize90`` read them as fp32 rows (out of bounds:
-CUDA_ERROR_ILLEGAL_ADDRESS in FoldForge's step; garbage parameter gradients where it did not fault)."""
+CUDA_ERROR_ILLEGAL_ADDRESS in FoldJet's step; garbage parameter gradients where it did not fault)."""
 
 import typing
 
@@ -54,7 +54,7 @@ def test_backward_under_autocast_equals_backward_outside(backend: str, key_windo
         call_c = c.expand(samples, 1, n, 128) if shared else c
         with torch.autocast("cuda", dtype=torch.bfloat16):
             y = m(x, call_c, z, mask)
-            if autocast_backward:  # FoldForge: the loss and its backward inside the autocast region
+            if autocast_backward:  # FoldJet: the loss and its backward inside the autocast region
                 (y.float() * dy).sum().backward()
         if not autocast_backward:
             (y.float() * dy).sum().backward()

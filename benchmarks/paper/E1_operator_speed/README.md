@@ -4,7 +4,7 @@ All 39 operator classes, every row of `src/foldjet_engine/requirements/requireme
 dtypes of the row (`master`, `float32`, ...), all lengths of a row (`lengths: all`), minimum MSA depth / samples (the judge's canonical speed
 run, `measure/configs/speed.yaml`; iterations 100 instead of 50). Backends: `pytorch` (the reference, measured in the same process), `cuda`, `triton`,
 `cueq` (stage `engine`) and `anthropic` (stage `kit`, through the card's kit stack: H100 `kit_stack.sh`, A100 `kit_stack_compat.sh` with
-`MINIWORLD_ANTHROPIC_ROOT` = a cu129 / py312 release root, cssb3 `~/w45-jobs/upstream`; the RTX 5090 runs it in the engine env).
+`FOLDJET_ENGINE_ANTHROPIC_ROOT` = a cu129 / py312 release root, cssb3 `~/w45-jobs/upstream`; the RTX 5090 runs it in the engine env).
 The paper numbers are ratios against PyTorch, geometric mean per class over the same cases (`paper_common/tables.py`).
 
 Files: `cfg_engine.yaml`, `cfg_kit.yaml`, `h100.sbatch`, `a100.sbatch`, `rtx5090.sh`, `collect.py`.

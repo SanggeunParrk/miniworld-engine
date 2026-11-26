@@ -36,6 +36,8 @@ The cubins are built on first use by the newest nvcc here that knows sm_100a (``
 
 from __future__ import annotations
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
+
 import functools
 from pathlib import Path
 

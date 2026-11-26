@@ -1,4 +1,4 @@
-"""R2 (FoldForge): ``OuterProductMean(count_offset=1e-3)`` (AlphaFold 3's pair divisor ``n + 1e-3``) on the kernels -- cuda (H100 sm_90a, A100 sm_80)
+"""R2 (FoldJet): ``OuterProductMean(count_offset=1e-3)`` (AlphaFold 3's pair divisor ``n + 1e-3``) on the kernels -- cuda (H100 sm_90a, A100 sm_80)
 and triton serve it, forward and backward, and match the float64 reference as closely as the ``pytorch`` backend does (padded tokens included: their
 pairs divide by 1e-3, not by 1)."""
 

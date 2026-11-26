@@ -6,13 +6,13 @@ Sources read: `_h100_fp8.py`, `h100_b200style_fp8.py`, docs/fp8.md (TriMul secti
 - ONLY the contraction operands: the K1-output planes a and b (plane value = sigmoid(g) * p, bf16 on the default route).  Everything else stays bf16/fp32:
   LN_in, the four projections (K1 compute), the contraction accumulator (fp32), t (bf16 output of the e4m3 GEMM), LN_out, K3 projection and gate, residual.
 - Placement study (fp64 emulation, `emul.py`, update rms error / bf16 floor 0.65 %): planes 3.72 %; + K1 gate projections 4.25 %; + all K1 projections 6.8 % (the
-  experimental `MINIWORLD_TRIMUL_FP8_K1=1`, never default); + t as K3 operand 4.5 % (built, no gain, removed); + K3 projection 5.3 %; + K3 gate 4.0 %.
+  experimental `FOLDJET_ENGINE_TRIMUL_FP8_K1=1`, never default); + t as K3 operand 4.5 % (built, no gain, removed); + K3 projection 5.3 %; + K3 gate 4.0 %.
   => the planes are the one placement that pays; value paths (projections, t, W_o) cost 0.8-3 % each, gate paths (sigmoid slope) only 0.3-0.5 %.
 - "t as e4m3" implemented and REMOVED: contraction is tensor-bound (no faster), K3 saves <= 3.6-6.3 % bytes, measured slower in 15 of 16 cells.
 
 ## 2. Scale granularity and where scales come from
 - Power-of-two per-TENSOR scales: one `sa` for the a planes and one `sb` for the b planes (per direction in the bidirectional block).  Per-channel mode exists
-  (`MINIWORLD_TRIMUL_FP8_SCALE=channel`, K3_CSCALE=1) but pow2 rounding leaves the e4m3 error unchanged, so channel-uniform costs nothing in accuracy (default `tensor`).
+  (`FOLDJET_ENGINE_TRIMUL_FP8_SCALE=channel`, K3_CSCALE=1) but pow2 rounding leaves the e4m3 error unchanged, so channel-uniform costs nothing in accuracy (default `tensor`).
 - `t = sa*sb * sum_k qa qb` exactly (pow2); the factor `csc = sa*sb` is folded on the H100 into K3: the projection operand `wpf = wpf0 * csc` (host, per call/refresh) and the
   LN_out statistics (mean*cs, var*cs^2).  K1 applies the scale through PRE-SCALED weights (W_p * 1/s; `qinv`), so the gate epilogue value is already the scaled plane value and is only
   cast (`cvt.rn.satfinite.e4m3x2`), amax of the scaled value goes to the guard buffer.
@@ -33,14 +33,14 @@ Sources read: `_h100_fp8.py`, `h100_b200style_fp8.py`, docs/fp8.md (TriMul secti
 ## 4. Gates (why)
 - `serves`: POLICY on; pair 4-D, square, 1..16 samples (B>1 = the one-sample route per sample, shared scales; the batched default is one launch, so small-L B>1 gains less), D in {64,128,256,384,512},
   `module.d_hidden == D` (hidden = pair), bf16, L >= 16, LayerNorm eps 1e-5 both, mask None or bool [B*L].
-- D512 (IntelliFold2 trunk): one direction only, B = 1, L % 128 == 0, L <= 2048 (MAX_L_512; what was measured), env `MINIWORLD_TRIMUL_FP8_D512=0` off.  Bidirectional D512 not built.
+- D512 (IntelliFold2 trunk): one direction only, B = 1, L % 128 == 0, L <= 2048 (MAX_L_512; what was measured), env `FOLDJET_ENGINE_TRIMUL_FP8_D512=0` off.  Bidirectional D512 not built.
 - `MIN_L[(D, dir)]` (dir 0 bidir, 1 out, 2 in), measured on H100 graph replay vs a same-cubin control: (128,1) 144, (128,2) 192, (256,1) 224, (256,2) 144, (128,0) 256, (256,0) 1024,
   (64,1|2) 512, (64,0) 2048, (384,1|2) 128, (384,0) 1024, (512,*) 0.  Reason: below the gate the e4m3 route's extra kernel (cuBLASLt e4m3 + 0.8 us workspace memset, second K1 launch in the
-  bidirectional block recomputing LN_in) costs as much as the tensor-rate gain; D64 is byte-bound.  Env `MINIWORLD_TRIMUL_FP8_MINL=<n>` replaces every gate (0 = none).
+  bidirectional block recomputing LN_in) costs as much as the tensor-rate gain; D64 is byte-bound.  Env `FOLDJET_ENGINE_TRIMUL_FP8_MINL=<n>` replaces every gate (0 = none).
 - RF3 (`TriangleMultiplicationRF3`): `_LeftScaled` hands a per-call product W_a*(1/n) (new tensor every call -> never cached, captures fell back).  Fix = `module_route` takes the PARAMETER
   `left_base_weight` for calibration/cache key and the factor `left_length_factor` as device scalar `lfac`; `lfac` multiplies the K3 channel scale `csc` at run time (K3 reads csc for the LN_out
   statistics) and rebuilds `wpf = wpf0*csc`; planes/scales/prescaled weights are the plain module's: ONE calibration whatever the length factor.  bf16 fallback multiplies `to_left.weight` by lfac.
-- Env switches: `MINIWORLD_TRIMUL_FP8={calib|dynamic}` (via `fp8.env`; preset `safe` = calib), `_GUARD={sync|lazy|off}`, `_HEADROOM`=16, `_SCALE={tensor|channel}`, `_MINL`, `_D512`, `_FASTACC`, `_K1`, `_RECORD`.
+- Env switches: `FOLDJET_ENGINE_TRIMUL_FP8={calib|dynamic}` (via `fp8.env`; preset `safe` = calib), `_GUARD={sync|lazy|off}`, `_HEADROOM`=16, `_SCALE={tensor|channel}`, `_MINL`, `_D512`, `_FASTACC`, `_K1`, `_RECORD`.
 - Training: not served (inference only; no FP8 backward; e5m2 no-go).
 
 ## 5. Measured on H100 (graph replay, FP8/default; cool/sustained)

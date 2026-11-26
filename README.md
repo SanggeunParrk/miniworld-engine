@@ -10,7 +10,7 @@ from human-managed version numbers, which results are current (the judge).
 
 > **Renamed.** foldjet-engine 1.0.0 is miniworld-engine 3.0.12 under a new name: package `foldjet_engine` (`import miniworld_engine`
 > still works and warns), PyPI `foldjet-engine` and `foldjet-engine-kernels-*`; the prebuilt kernels are the 3.0.12 files, unchanged.
-> The `MINIWORLD_*` environment variables and cache directory names are kept. See [docs/release-notes/RELEASE_NOTES_1.0.0.md](docs/release-notes/RELEASE_NOTES_1.0.0.md).
+> The environment variables are `FOLDJET_ENGINE_*` (the old `MINIWORLD_*` names are still read, with a warning) and the caches `~/.cache/foldjet_engine_{jit,headers}` (an existing `miniworld_engine_*` cache keeps being used). See [docs/release-notes/RELEASE_NOTES_1.0.0.md](docs/release-notes/RELEASE_NOTES_1.0.0.md).
 
 ## Install
 
@@ -62,7 +62,7 @@ Mixed precision as the models run it (`master` in the requirements): fp32 parame
 | `pytorch` | the reference: the single source of truth of each op's math | the reference |
 | `cuda` | the engine's hand-written kernels for the input's card | binding: GREEN = within `max(err_pytorch, fixed[dtype])` of the fp64 gold |
 | `triton` | the engine's Triton kernels (no TMA), any CUDA card | binding |
-| `anthropic` | Anthropic's [uplifting-biomolecular-modeling](https://github.com/anthropics/uplifting-biomolecular-modeling) release, connected as it ships (needs the release at `third_party/anthropic/upstream` or `MINIWORLD_ANTHROPIC_ROOT`) | informational (baseline) |
+| `anthropic` | Anthropic's [uplifting-biomolecular-modeling](https://github.com/anthropics/uplifting-biomolecular-modeling) release, connected as it ships (needs the release at `third_party/anthropic/upstream` or `FOLDJET_ENGINE_ANTHROPIC_ROOT`) | informational (baseline) |
 | `cueq` | NVIDIA cuEquivariance 0.12 (`cuequivariance_torch`), connected as it ships | informational (baseline) |
 | `engine-fp8` | opt-in: the `cuda` backend with the FP8 (e4m3) inference routes on; the default stays bf16 / fp16 ([docs/fp8.md](docs/fp8.md)) | none: outside the judge |
 
@@ -74,7 +74,7 @@ each class ([docs/modules.md](docs/modules.md)).
 
 Every class is in `foldjet_engine.modules`. The models are the ones whose constructors produce the class's requirement rows
 (`source` column of [requirements_module.csv](src/foldjet_engine/requirements/requirements_module.csv)): AF3-family models built by
-FoldForge, and MiniWorld. `engine-own` rows are shapes the engine keeps although no current downstream constructor builds them.
+FoldJet, and MiniWorld. `engine-own` rows are shapes the engine keeps although no current downstream constructor builds them.
 
 | group | classes | used by (requirement `source`) |
 |---|---|---|

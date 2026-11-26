@@ -1,4 +1,4 @@
-"""The fused residual add of parallel branches (FoldForge request R12).
+"""The fused residual add of parallel branches (FoldJet request R12).
 
 A parallel stage whose parts own their residuals (each part returns ``y_i = x + delta_i``; Chai-1's MSA block: the MSA attention and the
 MSA transition on the MSA, the two triangle multiplications and the pair transition on the pair, then the two triangle attentions) updates

@@ -84,7 +84,7 @@ def _fwd_op(args: list[torch.Tensor], eps: float, eps_prod: float, train: bool) 
     ext = _ext()
     lnw32, lnb32, wlr, wf, bf = _forms(lnw, lnb, wl, wr, gam, bet, wo, bo, infer=not train)
     f8 = None
-    if not train:  # opt-in e4m3 grouped product (MINIWORLD_OPM_FP8=bound; docs/b200/fp8.md, agent G)
+    if not train:  # opt-in e4m3 grouped product (FOLDJET_ENGINE_OPM_FP8=bound; docs/b200/fp8.md, agent G)
         from foldjet_engine.kernels.integrations import opm_fp8 as _oh
 
         if _oh.POLICY == "bound":

@@ -19,7 +19,7 @@ what was measured, and what is still not served (gap analysis). Judging: [measur
 fp32-master parameters are cast inside (one launch, or once per parameter version through `_capture.param_forms` at inference);
 their gradients come back fp32. The kernels are the ones of the B200 port branch `origin/b200/ladder-final` (dc425caa5), brought over
 unchanged except: the `settings` knobs of that tree are module constants (`DW_REPL`, `REPL`, `SMALL_TILES`, `SMALL_FWD_TILES`;
-`$MINIWORLD_TRANSITION_SM100_NVCC` overrides the toolkit), a build failure goes through `_nvcc.build_failed` (2.5.x's policy), and
+`$FOLDJET_ENGINE_TRANSITION_SM100_NVCC` overrides the toolkit), a build failure goes through `_nvcc.build_failed` (2.5.x's policy), and
 `fused_generic_sm100a._plan` plans an unsplit GEMM when K is a single K-block (D 64 bf16 crashed with `TypeError` there).
 Cubins are built by `kernel_toolchain()` (the newest nvcc that knows sm_100a: CUDA 13.1 on the box) under
 `engine_jit_root/transition_sm100a/`; the host binding `transition_fused_sm100a` (`sm100/transition_sm100.cu`) is built for
@@ -3392,5 +3392,5 @@ eval D384 n4 L128 16.16 -> 14.11, L256 16.16 -> 14.21 (H100 line 13.2 / 13.1); e
 Stress x scale {1e-3, 1, 40} x mean {0, 25} on D384 n4 L512, n2 L1536, D768 n2 L512 / L1024: rms error vs gold identical to 3 digits with and without the change (e.g. scale 1.5: 2.512e-3 vs 2.512e-3; torch bf16 3.47e-3), max error within 13 % in one cell (scale 1: 2.01e-2 -> 2.28e-2, PyTorch bf16 3.5e-2); no NaN. `measure.accuracy` Transition all 614 records: cuda 247 GREEN / 57 YELLOW / 0 RED, identical colours to base, one error changed (row 36 L1536 3.99e-3 -> 3.67e-3). tanh.approx error: ~2^-11 relative on tanh (absolute 2.4e-4 on the sigmoid for a < -2; it is the form TR_SIG 1 / SIGT 1 already ship). `tests/gpu/test_transition_b200_uninit.py` 19 passed; poison-memory check (eager clean = eager poisoned = captured graph, bitwise) ALL EQUAL for 20 D 384 / 512 / 768 cells (`n1cfg/poison.py`, `poison_pair`); `_prebuild --arch sm100 --check`: 0 not built, 204 pre-existing "no compiled kernel matches" lines, identical to base (rc 1 as in base).
 
 ## FP8 (opt-in, 2026-11-19)
-An opt-in e4m3 inference route for D 512 / 768 (`kernels/transition/cuda/fp8_sm100a.py`, `MINIWORLD_TRANSITION_FP8=calib` / `MINIWORLD_FP8=safe` / backend `engine-fp8`) is documented in `docs/b200/fp8.md`;
+An opt-in e4m3 inference route for D 512 / 768 (`kernels/transition/cuda/fp8_sm100a.py`, `FOLDJET_ENGINE_TRANSITION_FP8=calib` / `FOLDJET_ENGINE_FP8=safe` / backend `engine-fp8`) is documented in `docs/b200/fp8.md`;
 off by default, the default route above is bit-identical with it off.

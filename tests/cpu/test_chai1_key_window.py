@@ -1,4 +1,4 @@
-"""FoldForge R9: ``AtomDiTChai1(key_window="pad")`` + ``uid`` is Chai-1's release window exactly; there is no circular window to add.
+"""FoldJet R9: ``AtomDiTChai1(key_window="pad")`` + ``uid`` is Chai-1's release window exactly; there is no circular window to add.
 
 Chai-1 0.6.1 (``chai_lab/model/utils.py``): ``get_qkv_indices_for_blocks`` takes keys ``[32 w - 48, 32 w + 80)`` and returns
 ``kv_mask = (kv_indices < N) & (kv_indices >= 0)`` before ``kv_indices % N`` (the ``%`` only indexes: "mask out positions where kv_indices

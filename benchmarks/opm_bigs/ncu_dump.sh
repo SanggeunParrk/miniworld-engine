@@ -1,5 +1,5 @@
 #!/bin/bash
-ENV=/home/psk6950/miniworld-engine/.pixi/envs/default; export PATH=$ENV/bin:$PATH LD_LIBRARY_PATH=$ENV/lib
+ENV=/home/psk6950/foldjet-engine/.pixi/envs/default; export PATH=$ENV/bin:$PATH LD_LIBRARY_PATH=$ENV/lib
 for f in "$@"; do echo "== $f"; /usr/local/cuda/bin/ncu --import $f --page raw --csv 2>/dev/null | python -c "
 import sys,csv
 r=list(csv.reader(sys.stdin)); h=r[0]

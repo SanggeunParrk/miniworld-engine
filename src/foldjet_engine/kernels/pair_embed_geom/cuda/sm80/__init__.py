@@ -4,6 +4,8 @@ the sm_80 forms of its sm_90-only helpers (``pe_sm80.cuh``: the table gradient's
 
 from __future__ import annotations
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
+
 import functools
 import os
 import sys
@@ -24,8 +26,8 @@ def ext():
 
     ensure_cuda_home()
     # the H100's inference forwards: this source built for sm_90a (the training launchers stay the sm90 build). The target comes from
-    # MINIWORLD_ENGINE_BUILD_ARCH when set (a GPU-less prebuild: kernels/_prebuild.py sets it for every arch), else from the device.
-    forced = os.environ.get("MINIWORLD_ENGINE_BUILD_ARCH", "").lower().removeprefix("sm").removeprefix("_").rstrip("a")
+    # FOLDJET_ENGINE_BUILD_ARCH when set (a GPU-less prebuild: kernels/_prebuild.py sets it for every arch), else from the device.
+    forced = os.environ.get("FOLDJET_ENGINE_BUILD_ARCH", "").lower().removeprefix("sm").removeprefix("_").rstrip("a")
     h100 = forced == "90" if forced else (not building_sm120() and torch.cuda.get_device_capability() == (9, 0))
     return load_extension(
         name="pair_embed_geom_sm90gt2" if h100 else "pair_embed_geom_sm80",

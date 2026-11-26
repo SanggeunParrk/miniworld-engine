@@ -448,7 +448,7 @@ def _run_rowpad(leaves, mask, direction, out=None):
             front(x, weights, token, gi, bi, ab, xs)
             # D64 / D128 (hidden = D, integrations.trimul_h100.ROWPAD_FROM on): the measured single-direction table
             tri = _contract(ab, d, direction, table=LT_UNI if d in (64, 128) else None)  # [h, (B,) np, np]
-            del ab  # the planes are dead once contracted: freed before y, so the peak is x + planes + tri, not + y (FoldForge 5I28 OpenDDE)
+            del ab  # the planes are dead once contracted: freed before y, so the peak is x + planes + tri, not + y (FoldJet 5I28 OpenDDE)
         return [rowpad_k3(x, tri, xs, vec, wp, wg, go, bo, gi, bi, h, out)]
 
 
@@ -500,7 +500,7 @@ def _run_forward(leaves, mask, ds, direction, save, out=None):
             _front(x, w1, pm, gi, bi, ab, xs, xn=saved_xn)
             tri = _contract(ab, d, direction)
         # inference: the planes are dead once contracted; free them before y is allocated, so the peak is x + planes + tri (not
-        # + y): at D384 L3968 (FoldForge 5I28 OpenDDE n=16, the structural-token refiner) that is 45 GiB instead of 56 GiB
+        # + y): at D384 L3968 (FoldJet 5I28 OpenDDE n=16, the structural-token refiner) that is 45 GiB instead of 56 GiB
         planes = ab if save else None
         del ab
         wpf, wgf = torch.empty_like(wp), torch.empty_like(wg)
@@ -777,7 +777,7 @@ def trimul(leaves, mask, ds, direction=0, out=None):
     ):
         raise ValueError("invalid B200-style Hopper weights, norm affines, mask or dropout scale")
     if not torch.is_grad_enabled():
-        # fp32 masters: the bf16 casts once per parameter version, not per call (FoldForge: thousands of copy launches per trunk)
+        # fp32 masters: the bf16 casts once per parameter version, not per call (FoldJet: thousands of copy launches per trunk)
         mats = list(leaves[1:7])
         if all(w.dtype == torch.bfloat16 for w in mats):
             cast = cast_training_weights(mats)

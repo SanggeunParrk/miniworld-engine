@@ -1,4 +1,4 @@
-"""FoldForge 5I28 (A100, OpenDDE n = 12): the structural-token refiner's pair is [S, S, 384] with S = 2944 (3.3e9 elements > 2**31). The
+"""FoldJet 5I28 (A100, OpenDDE n = 12): the structural-token refiner's pair is [S, S, 384] with S = 2944 (3.3e9 elements > 2**31). The
 Triton TriMul's fused back half indexed its channel-major contraction in int32 (``channel * L * L``): an illegal address on A100, a
 silently wrong result on H100. Both inference and training now index in 64 bits above the bound (the training LN_out kernels over the
 m-major contraction view took a WIDE constexpr too, so the training refusal past 2**31 elements was lifted).

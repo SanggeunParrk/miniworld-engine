@@ -15,7 +15,7 @@
 #   PARALLEL   (default 4)                      measurement jobs (GPUs) at once
 #   PLAN_GROUPS (default PARALLEL)              groups the plan is split into (more groups than GPUs keeps every free GPU busy)
 #   NODELIST   (optional)                       --nodelist for every job (a cluster where only some nodes are free)
-#   KITS_DIR, FF_SCRATCH, KIT_VENV, MINIWORLD_ANTHROPIC_ROOT   the kit stack of the K* groups (third_party/anthropic/kit_stack.sh): the plan puts
+#   KITS_DIR, FF_SCRATCH, KIT_VENV, FOLDJET_ENGINE_ANTHROPIC_ROOT   the kit stack of the K* groups (third_party/anthropic/kit_stack.sh): the plan puts
 #              the cases of measure.config.KIT_STACK_BACKENDS (anthropic) there; an H100 runs them in the kits' CUDA-13 container
 #   KIT_COMPAT_DIR, KIT_STACK   an A100 (CARD=a100_sm80) runs the K* groups through third_party/anthropic/kit_stack_compat.sh: the engine env with
 #              the CUDA-13.0 forward-compatible libcuda of KIT_COMPAT_DIR in front; KIT_STACK overrides the wrapper

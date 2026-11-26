@@ -535,7 +535,7 @@ Still above 0.667 after this part (H100 >= 20 us on every case of these classes,
 ### The slid window's TAIL on the tensor cores (2026-11-23; `cuda:b200_sm100` 28 of AtomDiTProtenix / AtomDiTOpenFold3)
 
 The CUDA-core tail of the part below (`ltail.cuh`, one group-1 edge CTA per head and sample range) made AF3 / Protenix training with
-padded atoms far slower than the H100: FoldForge's F6 bench pads every example to 4,096 atoms (268-384 real tokens), and at 48 samples
+padded atoms far slower than the H100: FoldJet's F6 bench pads every example to 4,096 atoms (268-384 real tokens), and at 48 samples
 `local_attn_dkv_tf32` took 77 ms a call (3.7 s of the 8.8 s step; the forward kernel 0.9 ms). The E1 cases never showed it: their real
 count is N (no tail), and they measure `slide` only at 1 and 8 samples.
 
@@ -2998,7 +2998,7 @@ fallback, the global bf16 inference refused below 8192 rows).
 `train_rows.cu` / `edge.cu` row and edge kernels, `sm80_atom_rows`, `sm80_atom_local`) run unchanged on sm_100a, which keeps the
 warp-level tensor-core instructions and the 227 KB of shared memory per block of the H100. They are built for sm_100a by the one
 retargeting hook the RTX 5090 port introduced: `kernels/_sm120.py` now also answers `building_sm100()` (capability 10.0, or
-`MINIWORLD_ENGINE_BUILD_ARCH=sm100` for a GPU-less prebuild) and compiles every `sm80_load_extension` / `sm80_cubin_flags` build as
+`FOLDJET_ENGINE_BUILD_ARCH=sm100` for a GPU-less prebuild) and compiles every `sm80_load_extension` / `sm80_cubin_flags` build as
 `<name>_sm100` with `-gencode=arch=compute_100a,code=sm_100a` and `-DMWE_SM100` (no source reads that define). Cards other than the
 B200 build exactly what they built before. Gates opened for capability 10.0: `modules/atom_dit._local_sm80`, `modules/dit_variant_cuda._atom_sm80`
 (the token variants keep `_a100`), `kernels/dit_variants/cuda/train.atom_serves`, `kernels/integrations/local_dit_sm80_block.serves`
@@ -3122,7 +3122,7 @@ Served but with a known weakness:
   no FlashAttention-4 in the B200 environment); the backward's head-wise RMSNorm + rotary tail is elementwise torch (fp32), not a
   kernel. Inference YELLOW in 5 of 8 lengths (at most 1.24 x the tolerance) where the Triton backend (fp32 row stages, bf16 attention)
   is GREEN: the TF32 rounding of the rows adds to the bf16 attention operands. A TF32 global attention kernel (fp32 operands) would
-  close it. The row is engine-own (legacy r109, no FoldForge / MiniWorld constructor builds it).
+  close it. The row is engine-own (legacy r109, no FoldJet / MiniWorld constructor builds it).
 - Speed lever not taken (every served case beats Triton and PyTorch): the five block-local classes run the A100's
   `mma.sync` kernels and cuBLAS (`dit_variants` rows, `local_dit_sm80_block`), not the B200's own tcgen05 local DiT
   (`origin/b200/ladder-final`: `integrations/local_dit.py`, `kernels/augmented_attention/cuda/sm100_atom/` row kernels, the
@@ -3138,7 +3138,7 @@ Served but with a known weakness:
   window attention and pair bias (only the attention core swapped).
 - B200 prebuild: the sm_100a builds of the sm_80 sources compile on first use (`dit_variants_train_rows_sm80_sm100` ~60 s,
   `af3_local_rows_sm80_sm100`, the `atom_local_mma_sm80_sm100/*` cubins); no prebuild plan enumerates a `b200_sm100` target for the
-  sm_80 builders (`kernels/_prebuild.py` knows sm80 / sm90 / sm120). The keys are those of `MINIWORLD_ENGINE_BUILD_ARCH=sm100`.
+  sm_80 builders (`kernels/_prebuild.py` knows sm80 / sm90 / sm120). The keys are those of `FOLDJET_ENGINE_BUILD_ARCH=sm100`.
 - Not a requirement case, the same on A100 / RTX 5090: a bf16 activation with fp32 parameters called WITHOUT autocast on the
   `dit_variants` path (Boltz-2 / RoseTTAFold3 / Chai-1 / OpenFold3) passes `_supports_cuda` and fails in `_atom_tables` (a bf16 x fp32
   `F.linear`); the master rows always run under bf16 autocast.
@@ -3146,7 +3146,7 @@ Served but with a known weakness:
 ## Changes outside sm_100a-only code (wiring round)
 
 - `kernels/_sm120.py`: `building_sm100()`, `_target()`; `_retarget(flags, arch)` takes the arch; `sm80_load_extension` /
-  `sm80_cubin_flags` retarget to sm_100a on a B200. On every other card (and under `MINIWORLD_ENGINE_BUILD_ARCH=sm80 / sm90 /
+  `sm80_cubin_flags` retarget to sm_100a on a B200. On every other card (and under `FOLDJET_ENGINE_BUILD_ARCH=sm80 / sm90 /
   sm120`) the flags, names and keys are what they were.
 - `modules/atom_dit.py`: `_local_sm80` (the `_LocalAtomDiT` gates; `_a100` itself unchanged, so the SWA classes do not take the sm_80
   SWA path on the B200), the B200 SWA route, `backend_versions["cuda:b200_sm100"]` entries.
@@ -3336,6 +3336,6 @@ The H100 e4m3 row kernels (`pre90_f8` / `post90_f8`) have no B200 counterpart; t
 (analytic, from the measured bf16 block times 52 / 89 us), so the bound of an e4m3 product is ~6-8 % before the per-row amax cast it would add to the binding row-thread path. Nothing in this file's kernels changed; numbers and reasoning in `docs/b200/fp8.md`.
 
 ## 2026-11-19 (agent E, n14-e): the FP8 atom DiT rows route is BUILT and measured (supersedes the analytic note above)
-`b200_atom/{pre_fwd_f8.cu, post_fwd_f8.cu, f8.py}`: e4m3 q / k / v / gate projections and out projection + SwiGLU expand (Boltz-2's up gate included) on tcgen05 `kind::f8f6f4`, opt-in (`MINIWORLD_ATOMDIT_FP8_B200`), default off and bit-identical
+`b200_atom/{pre_fwd_f8.cu, post_fwd_f8.cu, f8.py}`: e4m3 q / k / v / gate projections and out projection + SwiGLU expand (Boltz-2's up gate included) on tcgen05 `kind::f8f6f4`, opt-in (`FOLDJET_ENGINE_ATOMDIT_FP8_B200`), default off and bit-identical
 (`pre_fwd.cu` / `post_fwd.cu` untouched). Measured (docs/b200/fp8.md, "Agent E"): 0.93-0.99 of a block at 1024 atoms x 5 samples, level time and -4 .. -5 % energy at 2048 x 5, +1.5 .. +6 % above; the tensor time the analytic note
 bounded at 6-8 % is real (free-quantisation ablation of the built stages: 0.85-0.90 of a row stage at 5120 rows, 0.95-0.99 at >= 20480), the per-row amax + cast on the row-thread path eats it. Served from 0 to 10240 rows.

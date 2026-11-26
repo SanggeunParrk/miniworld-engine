@@ -21,6 +21,8 @@ route runs unchanged).
 
 from __future__ import annotations
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
+
 import functools
 import math
 import os
@@ -35,13 +37,13 @@ _SRC = Path(__file__).with_name("b200_sources")
 E4M3_MAX = 448.0
 SCALE_FLOOR = 2.0**-30
 
-POLICY = _fp8_env("MINIWORLD_TRIMUL_FP8") or None  # None = off; "calib" = static scales (probe on the first eager call); "dynamic" = exact amax every call
-GUARD = os.environ.get("MINIWORLD_TRIMUL_FP8_GUARD", "sync")  # "sync" (eager: redo an overflowing call) | "lazy" (capturable) | "off"; under capture always lazy
-HEADROOM = float(os.environ.get("MINIWORLD_TRIMUL_FP8_HEADROOM", "16"))
-_MINL_ENV = os.environ.get("MINIWORLD_TRIMUL_FP8_MINL")
+POLICY = _fp8_env("FOLDJET_ENGINE_TRIMUL_FP8") or None  # None = off; "calib" = static scales (probe on the first eager call); "dynamic" = exact amax every call
+GUARD = os.environ.get("FOLDJET_ENGINE_TRIMUL_FP8_GUARD", "sync")  # "sync" (eager: redo an overflowing call) | "lazy" (capturable) | "off"; under capture always lazy
+HEADROOM = float(os.environ.get("FOLDJET_ENGINE_TRIMUL_FP8_HEADROOM", "16"))
+_MINL_ENV = os.environ.get("FOLDJET_ENGINE_TRIMUL_FP8_MINL")
 WIDTHS = (64, 128, 256, 384, 512)
 #: smallest L the e4m3 chain takes, per (width, direction: 1 outgoing / 2 incoming / 0 bidirectional); below it the bf16 route runs unchanged
-#: (B200 measurements: docs/b200/fp8.md). ``MINIWORLD_TRIMUL_FP8_MINL=<n>`` replaces every gate (0 = none).
+#: (B200 measurements: docs/b200/fp8.md). ``FOLDJET_ENGINE_TRIMUL_FP8_MINL=<n>`` replaces every gate (0 = none).
 MIN_L: dict = {(64, 1): 512, (64, 2): 512, (64, 0): 384, (128, 0): 384, (128, 1): 512, (128, 2): 512, (256, 1): 384, (256, 2): 384, (384, 0): 128, (384, 1): 256, (384, 2): 256, (512, 0): 128, (512, 1): 128, (512, 2): 128}  # (width, direction); other cells: MIN_L_DEFAULT. Served only where the gap-measured FP8 / bf16 ratio is <= 0.99; re-measured on a quiet GPU 2026-11-19 (agent G): (128, 0) 512 -> 384, (384, *) 512 -> 128 / 256 / 256 (docs/b200/fp8.md)
 MIN_L_DEFAULT = 256
 #: RoseTTAFold3 floor (every direction / width): quiet-GPU measurement, e4m3 / bf16 gap 1.11-1.39 at L 256-512, 1.02-1.07 at L 768, D128 0.947 at L 1024, D64 0.996 at L 1024 and 0.931 at L 1280 (docs/b200/fp8.md)

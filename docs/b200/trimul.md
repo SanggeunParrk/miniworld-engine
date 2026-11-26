@@ -2240,6 +2240,6 @@ Blockers measured (none of them a removable launch or Python glue: every miss ch
 
 ## FP8 (opt-in): e4m3 planes between the front and the contraction (2026-11-19, n13-fp8-b)
 
-OFF by default (bit-identical to the bf16 chain, 24 / 24 cases eager + graph). `MINIWORLD_TRIMUL_FP8=calib` (`b200_fp8.POLICY`): `k1w_f8.cu` writes the planes as e4m3 (power-of-two per-tensor scales, token order shuffled inside 16-token groups so the epilogue is one `stmatrix.trans`),
+OFF by default (bit-identical to the bf16 chain, 24 / 24 cases eager + graph). `FOLDJET_ENGINE_TRIMUL_FP8=calib` (`b200_fp8.POLICY`): `k1w_f8.cu` writes the planes as e4m3 (power-of-two per-tensor scales, token order shuffled inside 16-token groups so the epilogue is one `stmatrix.trans`),
 `ctr8.cu` contracts on `tcgen05 kind::f8f6f4` (1.7-2.0 PFLOP/s burst vs cuBLAS bf16 1.35-1.45; the scale sa sb applied in its epilogue; MN-major e4m3 operands for the incoming direction; 3-D maps clip at any L), K3 unchanged.
 Module (graph replay, same process, 3 rounds): -5 .. -10 % from L512, -10 .. -18 % at L1024-3072 (time and sustained energy), level at L <= 256 (D64 one direction gated at L512); update error 3.8 % against float64 (bf16 0.6 %, the H100's e4m3-plane error). Details, tables, rejected variants: docs/b200/fp8.md.

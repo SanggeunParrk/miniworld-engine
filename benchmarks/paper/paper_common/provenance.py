@@ -33,7 +33,7 @@ def engine_version() -> str:
     try:
         from importlib.metadata import version
 
-        return version("miniworld-engine")
+        return version("foldjet-engine")
     except Exception:  # recorded as unknown
         return "unknown"
 

@@ -26,8 +26,8 @@ open(p, "w").write(s)
 p = K + "integrations/bidir_triattn_h100.py"; s = open(p).read()
 old = "def _mm_f32(a, b):\n    return torch.mm(a, b, out_dtype=torch.float32)\n"
 new = '''#: (N1, cuda:b200_sm100 71 / Bidirectional 5) the tall-K fp32-output contractions of the bias-only backward (dWo, dW, dP: K = 16384 .. L L) on tuned cublasLt
-#: algorithms (``b200_sources/ltmm_sm100.cu``, chosen per shape by a deterministic / accurate timing sweep at the first eager call). MINIWORLD_BIDIR_B200_LT=0 turns it off.
-B200_LT = os.environ.get("MINIWORLD_BIDIR_B200_LT", "1") != "0"
+#: algorithms (``b200_sources/ltmm_sm100.cu``, chosen per shape by a deterministic / accurate timing sweep at the first eager call). FOLDJET_ENGINE_BIDIR_B200_LT=0 turns it off.
+B200_LT = os.environ.get("FOLDJET_ENGINE_BIDIR_B200_LT", "1") != "0"
 
 
 def _lt():

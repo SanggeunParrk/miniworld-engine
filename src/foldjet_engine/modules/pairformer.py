@@ -19,7 +19,7 @@ from foldjet_engine.modules.triangle import BidirectionalTriangleMultiplication,
 
 
 def _per_sample_call(pair: torch.Tensor) -> bool:
-    """A :class:`PairformerBlock` call the block may run one sample at a time: ``B > 1`` and no autograd recorded (FoldForge R19)."""
+    """A :class:`PairformerBlock` call the block may run one sample at a time: ``B > 1`` and no autograd recorded (FoldJet R19)."""
     return pair.shape[0] > 1 and not torch.is_grad_enabled()
 
 
@@ -165,16 +165,16 @@ class PairformerBlock(BackendModule, MasterWeights):
         single track is added and ``(pair, single)`` is returned (``single`` ``[B, L, d_single]`` is then required). ``extra_pair_bias``
         ``[B, n_head_single, L, L]`` is added to the single attention's pair-bias logits; it needs the single track.
 
-        Workspace (FoldForge R19): a call without autograd (``torch.no_grad`` / ``inference_mode``) and ``B > 1`` on ``"pytorch"`` runs
+        Workspace (FoldJet R19): a call without autograd (``torch.no_grad`` / ``inference_mode``) and ``B > 1`` on ``"pytorch"`` runs
         the block one sample at a time into the batched output (every statement acts per sample: the same math), so its temporaries
         are one sample's (the reference composition's are about 8-10 pair-sized tensors) plus the output, not ``B`` times that. The
         outputs equal the batched composition's up to GEMM rounding (a GEMM over one sample's rows may run another cuBLAS kernel). A
         call that records autograd keeps the batched composition (its saved activations are the batch's anyway). The kernel backends
-        run the batched composition (every sub-module takes ``B > 1``; the ``cuda`` ``AttentionPairBias`` too, since the FoldForge 5I28
+        run the batched composition (every sub-module takes ``B > 1``; the ``cuda`` ``AttentionPairBias`` too, since the FoldJet 5I28
         confidence-head change)."""
         if pair.is_cuda and not torch.compiler.is_compiling() and not torch.cuda.is_current_stream_capturing():
             # a finished item's hoisted tables (a token DiT's pair bias: 11.3 GiB at OpenDDE's 3968 structural tokens) go before this
-            # block's pair-sized temporaries are allocated, not at the next item's diffusion (FoldForge 5I28 OpenDDE n = 16)
+            # block's pair-sized temporaries are allocated, not at the next item's diffusion (FoldJet 5I28 OpenDDE n = 16)
             from foldjet_engine.kernels import _capture
 
             _capture.release_dead_inputs()
@@ -341,7 +341,7 @@ class PairformerBlock(BackendModule, MasterWeights):
     @staticmethod
     def _updates_on_cuda(modules: list[Any]) -> bool:
         """Whether every update runs on its ``cuda`` backend. The block's own ``backend`` is not the test: a caller that picks the backend
-        per sub-module (FoldForge's per-op policy: the block itself stays on ``"pytorch"``) gets the fused sum as the block set to ``"cuda"``
+        per sub-module (FoldJet's per-op policy: the block itself stays on ``"pytorch"``) gets the fused sum as the block set to ``"cuda"``
         does; a block whose updates run the reference (``set_backend("pytorch")``) keeps the reference statements."""
         return all(getattr(module, "backend", "pytorch") == "cuda" for module in modules)
 

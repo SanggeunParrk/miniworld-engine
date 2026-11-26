@@ -81,6 +81,7 @@ import traceback
 import torch
 from torch.utils import _pytree
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
 from foldjet_engine.modules.primitives import BackendUnsupported, unpadded_masks
 
 TIMING_MODES = ("graph", "compile+graph", "eager")

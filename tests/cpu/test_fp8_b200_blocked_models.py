@@ -22,26 +22,26 @@ def test_chai1_no_longer_blocked():
 
 
 def test_preset_off_for_blocked_model_on_b200(b200, monkeypatch):
-    monkeypatch.setenv("MINIWORLD_FP8", "safe")
-    monkeypatch.setenv("MINIWORLD_FP8_MODEL", BLOCKED)
+    monkeypatch.setenv("FOLDJET_ENGINE_FP8", "safe")
+    monkeypatch.setenv("FOLDJET_ENGINE_FP8_MODEL", BLOCKED)
     assert fp8.preset() is None
-    assert fp8.env("MINIWORLD_TRIMUL_FP8") is None
-    monkeypatch.setenv("MINIWORLD_FP8_MODEL", BLOCKED.capitalize() + " ")
+    assert fp8.env("FOLDJET_ENGINE_TRIMUL_FP8") is None
+    monkeypatch.setenv("FOLDJET_ENGINE_FP8_MODEL", BLOCKED.capitalize() + " ")
     assert fp8.preset() is None
 
 
 def test_preset_kept_for_other_models_on_b200(b200, monkeypatch):
-    monkeypatch.setenv("MINIWORLD_FP8", "safe")
+    monkeypatch.setenv("FOLDJET_ENGINE_FP8", "safe")
     for m in ("af3", "protenix1", "boltz2", "chai1", ""):
-        monkeypatch.setenv("MINIWORLD_FP8_MODEL", m)
+        monkeypatch.setenv("FOLDJET_ENGINE_FP8_MODEL", m)
         assert fp8.preset() == "safe"
 
 
 def test_preset_kept_off_b200(monkeypatch):
     monkeypatch.setattr(fp8, "arch", lambda: "sm90")
     monkeypatch.setattr(fp8, "B200_BLOCKED_MODELS", MappingProxyType({BLOCKED: "test stand-in"}))
-    monkeypatch.setenv("MINIWORLD_FP8", "safe")
-    monkeypatch.setenv("MINIWORLD_FP8_MODEL", BLOCKED)
+    monkeypatch.setenv("FOLDJET_ENGINE_FP8", "safe")
+    monkeypatch.setenv("FOLDJET_ENGINE_FP8_MODEL", BLOCKED)
     assert fp8.preset() == "safe"
 
 

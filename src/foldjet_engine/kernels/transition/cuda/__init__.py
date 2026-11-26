@@ -23,7 +23,7 @@ def transition_sm90a(x, ln_weight, ln_bias, wa, wb, ws, eps, n, fp8=True):
         if not ieee_f32.supported_transition(x, w[2], w[4], hopper=True):
             return None
         return ieee_f32.transition_ieee(x, w[0].contiguous(), w[1].contiguous(), w[2].contiguous(), w[3].contiguous(), w[4].contiguous(), float(eps))
-    if fp8 and not training:  # opt-in FP8 (MINIWORLD_TRANSITION_FP8; off by default: the check below is all the default route sees)
+    if fp8 and not training:  # opt-in FP8 (FOLDJET_ENGINE_TRANSITION_FP8; off by default: the check below is all the default route sees)
         from . import fp8_sm90a
 
         if fp8_sm90a.POLICY is not None and fp8_sm90a.serves(x, wa, ws):
@@ -65,7 +65,7 @@ def transition_sm80(x, ln_weight, ln_bias, wa, wb, ws, eps, fp8=True):
     rows = x.numel() // x.shape[-1] if x.dim() else 0
     limit = fused_fwd_sm80.max_rows(x.device, x.dtype)
     grad = torch.is_grad_enabled() and any(t is not None and t.requires_grad for t in (x, ln_weight, ln_bias, wa, wb, ws))
-    if fp8 and not grad and x.dtype is torch.bfloat16:  # the RTX 5090 e4m3 route (fp8.SM120_ROUTES slot; explicit MINIWORLD_TRANSITION_FP8 only, not in safe: fp8.SM120_PRESET_EXCLUDED)
+    if fp8 and not grad and x.dtype is torch.bfloat16:  # the RTX 5090 e4m3 route (fp8.SM120_ROUTES slot; explicit FOLDJET_ENGINE_TRANSITION_FP8 only, not in safe: fp8.SM120_PRESET_EXCLUDED)
         from . import fp8_sm120
 
         if fp8_sm120.POLICY is not None and fp8_sm120.serves(x, wa, ws):

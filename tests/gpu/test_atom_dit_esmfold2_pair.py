@@ -1,4 +1,4 @@
-"""``AtomDiTESMFold2Pair`` (FoldForge R6) on the ``cuda`` (H100 / A100) and ``triton`` backends against the fp64 PyTorch module: the RMS /
+"""``AtomDiTESMFold2Pair`` (FoldJet R6) on the ``cuda`` (H100 / A100) and ``triton`` backends against the fp64 PyTorch module: the RMS /
 SiLU row kernels (H100 inference) or the train_rows block, the q / k RMSNorm + rotary and the 192-key rank-window attention, inference and
 training. Adapted from the 2.4.x ``tests/gpu/sm90/test_h100_local_dit_esmfold2_gpu.py``."""
 

@@ -31,10 +31,10 @@ def test_bare_front_matches_padded_front(cls, length: int, monkeypatch: pytest.M
         length=length, samples=1, depth=None, dtype=torch.bfloat16, device="cuda", generator=torch.Generator(device="cuda").manual_seed(1)
     )
     with monkeypatch.context() as m:
-        m.setenv("MINIWORLD_TRIATTN_BARE", "1")
+        m.setenv("FOLDJET_ENGINE_TRIATTN_BARE", "1")
         bare = _run(module, inputs, "cuda")
     with monkeypatch.context() as m:
-        m.setenv("MINIWORLD_TRIATTN_BARE", "0")
+        m.setenv("FOLDJET_ENGINE_TRIATTN_BARE", "0")
         padded = _run(module, inputs, "cuda")
     ref = _run(module, inputs, "pytorch")
     scale = ref.abs().max().item()
@@ -67,10 +67,10 @@ def test_rf3_gate_bias_folded_into_the_front_shift(length: int, monkeypatch: pyt
         length=length, samples=1, depth=None, dtype=torch.bfloat16, device="cuda", generator=torch.Generator(device="cuda").manual_seed(1)
     )
     with monkeypatch.context() as m:
-        m.setenv("MINIWORLD_TRIATTN_BARE", "auto")
+        m.setenv("FOLDJET_ENGINE_TRIATTN_BARE", "auto")
         folded = _run(module, inputs, "cuda")
     with monkeypatch.context() as m:
-        m.setenv("MINIWORLD_TRIATTN_BARE", "0")
+        m.setenv("FOLDJET_ENGINE_TRIATTN_BARE", "0")
         epilogue = _run(module, inputs, "cuda")
     ref = _run(module, inputs, "pytorch")
     scale = ref.abs().max().item()
@@ -92,10 +92,10 @@ def test_rf3_d128_front_split_into_two_gemms(length: int, starting: bool, monkey
         length=length, samples=1, depth=None, dtype=torch.bfloat16, device="cuda", generator=torch.Generator(device="cuda").manual_seed(1)
     )
     with monkeypatch.context() as m:
-        m.setenv("MINIWORLD_TRIATTN_SPLIT", "auto")
+        m.setenv("FOLDJET_ENGINE_TRIATTN_SPLIT", "auto")
         split = _run(module, inputs, "cuda")
     with monkeypatch.context() as m:
-        m.setenv("MINIWORLD_TRIATTN_SPLIT", "0")
+        m.setenv("FOLDJET_ENGINE_TRIATTN_SPLIT", "0")
         single = _run(module, inputs, "cuda")
     ref = _run(module, inputs, "pytorch")
     scale = ref.abs().max().item()

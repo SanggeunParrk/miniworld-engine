@@ -1,4 +1,4 @@
-"""B200 OuterProductMean e4m3 product (``integrations.opm_fp8_b200``, opt-in ``MINIWORLD_OPM_FP8=bound``, default OFF): route on / off, accuracy against the fp64 gold next to the
+"""B200 OuterProductMean e4m3 product (``integrations.opm_fp8_b200``, opt-in ``FOLDJET_ENGINE_OPM_FP8=bound``, default OFF): route on / off, accuracy against the fp64 gold next to the
 bf16 route (large-weight stress), graph == eager, route stats, the depth gate."""
 
 import copy

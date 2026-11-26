@@ -1,4 +1,4 @@
-"""FoldForge R26: one sampler CUDA graph per shape, reused across folds (``foldjet_engine.capture.refresh_static_inputs``).
+"""FoldJet R26: one sampler CUDA graph per shape, reused across folds (``foldjet_engine.capture.refresh_static_inputs``).
 
 A small sampler step -- a token DiT stack (3 blocks) and an atom DiT stack (2 blocks), conditioning shared by the S = 5 samples (stride 0),
 L = 128 tokens -- on static input tensors:
@@ -49,7 +49,7 @@ ATOM_KEYS = ("protenix", "af3", "boltz2", "chai1", "intellifold2", "esmfold2_pai
 
 class Step(torch.nn.Module):
     """One sampler step on static inputs: the token stack and the atom stack read the fold's conditioning / pair / mask (one object each, as
-    FoldForge's stacks pass them), the step's own state (``x_tok`` / ``x_atom``) changes per step."""
+    FoldJet's stacks pass them), the step's own state (``x_tok`` / ``x_atom``) changes per step."""
 
     def __init__(self, token_key: str, atom_key: str, n_atoms: int):
         super().__init__()
@@ -67,7 +67,7 @@ class Step(torch.nn.Module):
             self.atom = _init(AtomDiTStack(atom_key, 2, backend="cuda", **kw)).float().cuda().eval().requires_grad_(False)
         self.dc, self.dp, self.n = dc, dp, n_atoms
         g = torch.Generator(device="cuda").manual_seed(123)
-        # the static inputs (FoldForge: batch / embeddings / single_base / pair_cond / key_mask / atom_state)
+        # the static inputs (FoldJet: batch / embeddings / single_base / pair_cond / key_mask / atom_state)
         self.x_tok = torch.randn(S, 1, L, 768, device="cuda", generator=g).bfloat16()
         self.c_tok = torch.empty(1, 1, L, dc, device="cuda", dtype=torch.bfloat16)
         self.z_tok = torch.empty(1, L, L, dp, device="cuda", dtype=torch.bfloat16)

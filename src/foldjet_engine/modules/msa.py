@@ -203,7 +203,7 @@ class OuterProductMean(BackendModule, MasterWeights):
         # b200 4 (2026-11-17): inference reads the bf16 parameter forms cast once per parameter version (opm_sm100._infer_flat, as the H100
         # param_forms: no cast launch per call / graph replay; L128 inference geomean 0.96); the backward's parameter gradients (and Chai-1's) in
         # one cast launch (_cast_cuda.cast, as the H100 path) instead of one copy each
-    }  # 2026-11-10: sm_80 paths; 2026-11-11: count_offset in the triton / sm_80 kernels (FoldForge R2); 2026-11-12: their sm_120a build (RTX 5090)
+    }  # 2026-11-10: sm_80 paths; 2026-11-11: count_offset in the triton / sm_80 kernels (FoldJet R2); 2026-11-12: their sm_120a build (RTX 5090)
     # (2026-11-13: inference past L 2048 forms the outer product per chunk of rows, sm80.epilogue_rows: bitwise the same outputs, no version change)
     # 5090 2 (2026-11-13): CUTLASS products on sm_120a (256 x 128 masked outer product from L 512, dA / dB, the Chai-1 groups), wide epilogue at d_pair 256
     # 5090 3 (2026-11-13): Chai-1 on sm_120a: masked batched products, 8-warp proj / projbwd, 2-stage epilogue, split-K dW, fused dWo / dgamma / dbeta

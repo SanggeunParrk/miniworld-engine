@@ -183,7 +183,7 @@ def _join(main: torch.cuda.Stream, aux: torch.cuda.Stream, w16: torch.Tensor) ->
 
 
 def _contract(w16: torch.Tensor, v: torch.Tensor, args: list[torch.Tensor], train: bool) -> torch.Tensor:
-    """o = w . v (cuBLAS bmm); the opt-in e4m3 contraction (``pwa_fp8_b200``, MINIWORLD_PWA_FP8=1, docs/b200/fp8.md) in inference where it serves."""
+    """o = w . v (cuBLAS bmm); the opt-in e4m3 contraction (``pwa_fp8_b200``, FOLDJET_ENGINE_PWA_FP8=1, docs/b200/fp8.md) in inference where it serves."""
     if not train:
         from . import pwa_fp8 as _h
 

@@ -2,7 +2,7 @@
 
 Everything here is EXPERIMENTAL, opt-in and off by default. Base: `rel/3.0.0` 1a2bbe42e (= 2.5.14 + the inference FP8 routes,
 [fp8.md](fp8.md)). With no training switch set every route is bit-identical to 2.5.14 (sha1 of the output and every gradient, separate
-processes). The training switch is separate from the inference `MINIWORLD_FP8` presets.
+processes). The training switch is separate from the inference `FOLDJET_ENGINE_FP8` presets.
 
 ## Token DiT (`conditioned_transition.cuda.token_dit_fp8_train`, branch `fp8t/tokendit`)
 
@@ -11,11 +11,11 @@ width 768, 16 x 48 heads, cond 384, pair 128). Scripts / raw rows (not in the tr
 L 128-768 (M = A L rows up to 36864).
 
 ```
-MINIWORLD_FP8_TRAIN=1                         # training switch: the token DiT takes RECOMMENDED (round 4: nox + hsave, bit-identical)
-MINIWORLD_TOKEN_DIT_FP8_TRAIN=<places>        # explicit: expand, squeeze, qkvg, out (forward); dexpand, dsqueeze, dqkvg, dout (dgrad);
-                                              # presets fast, transition, attention, all; "" / 0 = off (wins over MINIWORLD_FP8_TRAIN)
-MINIWORLD_TOKEN_DIT_FP8_TRAIN_GRAD=e4m3|e5m2  # 8-bit format of the incoming gradients (dgrad A operands); default e4m3
-MINIWORLD_TOKEN_DIT_FP8_TRAIN_MIN_ROWS=16384  # row gate (default 16384; every measurement below ran with 0)
+FOLDJET_ENGINE_FP8_TRAIN=1                         # training switch: the token DiT takes RECOMMENDED (round 4: nox + hsave, bit-identical)
+FOLDJET_ENGINE_TOKEN_DIT_FP8_TRAIN=<places>        # explicit: expand, squeeze, qkvg, out (forward); dexpand, dsqueeze, dqkvg, dout (dgrad);
+                                              # presets fast, transition, attention, all; "" / 0 = off (wins over FOLDJET_ENGINE_FP8_TRAIN)
+FOLDJET_ENGINE_TOKEN_DIT_FP8_TRAIN_GRAD=e4m3|e5m2  # 8-bit format of the incoming gradients (dgrad A operands); default e4m3
+FOLDJET_ENGINE_TOKEN_DIT_FP8_TRAIN_MIN_ROWS=16384  # row gate (default 16384; every measurement below ran with 0)
 ```
 
 Recipe: every activation / gradient operand gets a dynamic per-row (per-token) scale, row amax / FMAX (e4m3 448, e5m2 57344), written by
@@ -189,14 +189,14 @@ clear them for real models.
 
 ## Token DiT round 3 (branch `fp8t3/tokendit`): against the 3.0.1 default
 
-Base: `fp8t2/tokendit` (round 2: `nox` / `hsave` byte reductions, behind `MINIWORLD_TOKEN_DIT_FP8_TRAIN`) merged with origin/main 3.0.1 (shared
+Base: `fp8t2/tokendit` (round 2: `nox` / `hsave` byte reductions, behind `FOLDJET_ENGINE_TOKEN_DIT_FP8_TRAIN`) merged with origin/main 3.0.1 (shared
 conditioning on L rows, pair bias on the APB kernels). The baseline is now the 3.0.1 default (A48 L384 3.03 ms; it was 3.43 ms on 2.5.14).
 Training placements live in `token_dit_fp8_train.py`, separate from the inference gate `token_dit_fp8.active()`.
 Scripts: `tools/fp8_train/tokendit/` (`speed.py`, `run.sh`); raw rows `~/miniworld-engine-scratch/fp8t3-tokendit/res/`.
 
 Placements: `nox` (no fp32 residual copy: the backward reads the block input) and `hsave` (the forward keeps h; swiglu_bwd does not rewrite it)
 are byte reductions, bit-identical (no FP8; the fp64 error table below shows identical numbers); `expand` / `squeeze` are the e4m3 forward GEMMs.
-`RECOMMENDED` (= `MINIWORLD_FP8_TRAIN=1`, preset `recommended`) is now `expand + nox + hsave`; `squeeze` is dropped (see below). Gate: the byte reductions apply at
+`RECOMMENDED` (= `FOLDJET_ENGINE_FP8_TRAIN=1`, preset `recommended`) is now `expand + nox + hsave`; `squeeze` is dropped (see below). Gate: the byte reductions apply at
 every M; the FP8 GEMM at M = A L >= 16384.
 
 ### Step time (fwd + bwd, one CUDA graph per variant, same process, interleaved; H100 node02, job 58892 `res/speed3.jsonl`)
@@ -251,7 +251,7 @@ round; the e4m3 `expand` is the placement that the inference `safe` preset alrea
 - The route (`expand + nox + hsave`) beats the 3.0.1 default by ~1.5 % (sustained; 2.0-2.6 % cool) at M >= 18432 and ~1.2 % below; but 2/3 of the win comes from
   the bit-identical byte reductions, not from FP8. FP8 alone: ~0.5 % for 4-5 % rms gradient error on the transition parameters and the cond gradient (default 0.65 %).
   The honest ledger: FP8 training for the token DiT is a marginal win (inside the 1 % control spread), so recommended = byte reductions as the main change; `expand`
-  stays opt-in (`MINIWORLD_TOKEN_DIT_FP8_TRAIN=expand`, gate 16384) until an end-level training curve exists. Candidates for the main line: `nox` + `hsave` (bit-identical, 1.0-1.5 %) as default-route changes with a
+  stays opt-in (`FOLDJET_ENGINE_TOKEN_DIT_FP8_TRAIN=expand`, gate 16384) until an end-level training curve exists. Candidates for the main line: `nox` + `hsave` (bit-identical, 1.0-1.5 %) as default-route changes with a
   `backend_versions` bump (cuda only) — a decision for the release owner, not done here.
 - Does not pay (unchanged): dgrad placements, attention-side projections, wgrad, attention core.
 
@@ -311,7 +311,7 @@ ab in e4m3 saves 3 KB / row (9.5 % of the saved bytes, 56 MB at M 18432) and mov
 qkvg / qn / kn / vc in e4m3 is the placement that moved FoldBench in inference: not tried. x1 as bf16 would change the forward output (the residual stream is fp32).
 Bit-identical byte lever tried: `rx1` (x1 is not stored: `res_c` and the AdaLN-b backward recompute x1 = x + sigmoid(Gg + bg1) y from the block input; same fp32
 expression, output and every gradient bit-identical, tests): saved 589 -> 531 MB (-9.9 %), peak -3 %, but the step is 0.3-0.5 % SLOWER (the recomputation costs more than
-the 2 u write it saves; bytes 0.978 / 0.989 -> 0.983 / 0.992 at M 18432). Memory option only (`MINIWORLD_TOKEN_DIT_FP8_TRAIN=...,rx1`), not in `recommended`.
+the 2 u write it saves; bytes 0.978 / 0.989 -> 0.983 / 0.992 at M 18432). Memory option only (`FOLDJET_ENGINE_TOKEN_DIT_FP8_TRAIN=...,rx1`), not in `recommended`.
 
 ### (3) Finer-grained scales: no help (the error is the 3-bit mantissa, not the scale)
 
@@ -336,7 +336,7 @@ tiles on far larger models; the target <= 1.5 % rms gradient error is not reacha
 
 The row max of the bf16-rounded xt is a block max in the AdaLN-b kernel (one block per row); the e4m3 copy and the row scale are written next to xt. Bit-identical to the
 separate `q8_rows` pass (sha1 of output and 27 gradients, A48 L384, A8 L384, A5, A6 L200, A48 L128). Step (`rec` = expand + nox + hsave, cool / sustained, vs control):
-unfused 0.973 / 0.983 -> fused 0.971 / 0.980 at M 18432 (0.981 / 0.987 -> 0.980 / 0.985 at 36864): -0.2 / -0.3 %, as predicted. `MINIWORLD_TOKEN_DIT_FP8_TRAIN_FUSE_Q8=0` restores the pass.
+unfused 0.973 / 0.983 -> fused 0.971 / 0.980 at M 18432 (0.981 / 0.987 -> 0.980 / 0.985 at 36864): -0.2 / -0.3 %, as predicted. `FOLDJET_ENGINE_TOKEN_DIT_FP8_TRAIN_FUSE_Q8=0` restores the pass.
 
 ### (4) Step time against the 3.0.1 default (same process, one CUDA graph per variant, cool / sustained, final tree, job 59085 `res/speed6.jsonl`)
 
@@ -372,7 +372,7 @@ the per-channel scale 1e-39 and 1 / scale = inf; every quantizer now floors the 
 ### Verdict (round 4)
 
 - FP8 `expand` for training: NO-GO as a recommendation. The step gain is 0.7-0.9 % (inside the 1 % control spread), the gradient error of the transition 4-5 %, and the real
-  fine-tune shows +2 % diffusion loss at fixed weights. Kept opt-in (`MINIWORLD_TOKEN_DIT_FP8_TRAIN=expand`, gate 16384, default off) for the record; `RECOMMENDED` (`MINIWORLD_FP8_TRAIN=1`) is now `nox + hsave` only.
+  fine-tune shows +2 % diffusion loss at fixed weights. Kept opt-in (`FOLDJET_ENGINE_TOKEN_DIT_FP8_TRAIN=expand`, gate 16384, default off) for the record; `RECOMMENDED` (`FOLDJET_ENGINE_FP8_TRAIN=1`) is now `nox + hsave` only.
 - The bit-identical byte reductions `nox` + `hsave` are the whole win: 0.9-1.1 % sustained (1.5-2.1 % cool) at M >= 18432, 0.5-1.1 % sustained below, peak -3 %, largest A at L 384 1536 -> 1792 (+17 %), output and 27 gradients
   bit-identical to 3.0.1. Release candidate: branch `fp8t4/tokendit-bytes-default` (see the report: diff, `TokenDiTProtenix.backend_versions["cuda:h100_sm90"]` 5 -> 6, 292 accuracy + 292 speed cells owed on h100_sm90).
 - Finer scales, 8-bit saved activations (ab), `rx1`: no-go (above). Fused q8: kept (-0.2 / -0.3 %, bit-identical).
@@ -384,7 +384,7 @@ the per-channel scale 1e-39 and 1 / scale = inf; every quantizer now floors the 
 - Tests (H100): `test_token_dit_fp8_train.py` + `_bytes.py` + `train_accumulation` + `shared_cond` + `pair_apb`: 59 passed (this branch); 62 passed (release branch);
   `tests/cpu/test_fp8_switch.py` 19 passed; pyright 0 errors; ruff check / format clean on the touched files (`token_dit.py`'s pre-existing format drift left alone).
 - Release candidate (a decision for the user): branch `fp8t4/tokendit-bytes-default` = this branch + (i) `DEFAULT_BYTES = {nox, hsave}` in `token_dit_fp8_train.active()` (default-on for H100 bf16
-  default-option width-768 blocks; `MINIWORLD_TOKEN_DIT_TRAIN_BYTES=0` restores the 3.0.1 route), (ii) `TokenDiTProtenix.backend_versions["cuda:h100_sm90"]` 5 -> 6 (TokenDiTMiniWorld inherits it;
+  default-option width-768 blocks; `FOLDJET_ENGINE_TOKEN_DIT_TRAIN_BYTES=0` restores the 3.0.1 route), (ii) `TokenDiTProtenix.backend_versions["cuda:h100_sm90"]` 5 -> 6 (TokenDiTMiniWorld inherits it;
   Boltz2 / RF3 / Chai1 keep their own 7 because their blocks are not the default-option block), nothing else (no module `version`, no kernel / table version). Output and 27 gradients are
   bit-identical to 3.0.1 (sha1, 6 shapes, `res/bit_release.json` = `res/bit_base301.json`), so the re-measure is for the record only: `judge owed` with the bump = 292 accuracy + 292 speed cases
   on h100_sm90 (`res/owed_bump.txt`; 0 owed before). The kernel change is in `token_dit_train_rows.cu` (new template instantiations, new kernels `res_adaln_b_q8`; the
@@ -396,10 +396,10 @@ the per-channel scale 1e-39 and 1 / scale = inf; every quantizer now floors the 
 
 | env | effect |
 |---|---|
-| `MINIWORLD_OPM_FP8_TRAIN=e4m3` | FP8 forward + backward products, dO quantised to e4m3 (**recommended form**: more accurate than e5m2 here, see the error table) |
-| `MINIWORLD_OPM_FP8_TRAIN=e5m2` | same, dO in e5m2 (e4m3 x e5m2 products) |
-| `MINIWORLD_FP8_TRAIN=1` | turns the route on as `e4m3` unless `MINIWORLD_OPM_FP8_TRAIN` is set |
-| `MINIWORLD_OPM_FP8_TRAIN_MINS=<s>` | padded-depth gate (default 1024; 0 = none) |
+| `FOLDJET_ENGINE_OPM_FP8_TRAIN=e4m3` | FP8 forward + backward products, dO quantised to e4m3 (**recommended form**: more accurate than e5m2 here, see the error table) |
+| `FOLDJET_ENGINE_OPM_FP8_TRAIN=e5m2` | same, dO in e5m2 (e4m3 x e5m2 products) |
+| `FOLDJET_ENGINE_FP8_TRAIN=1` | turns the route on as `e4m3` unless `FOLDJET_ENGINE_OPM_FP8_TRAIN` is set |
+| `FOLDJET_ENGINE_OPM_FP8_TRAIN_MINS=<s>` | padded-depth gate (default 1024; 0 = none) |
 
 Module globals `opm_fp8_train.MODE` / `MIN_S` may be set at run time. Eager autograd and CUDA-graph capture work (all scales are device
 tensors, no host sync); `torch.compile` tracing is not served (the route declines while compiling and the default runs). H100 sm_90a,
@@ -537,7 +537,7 @@ No NaN / inf; the curves overlap within 0.22 %.
 
 ### Bit-identity of the default and tests
 
-- The FP8 code is all `#if defined(MINIWORLD_OPM_FP8)` in `csrc/opm_epilogue.cu` (the default builds preprocess to the same text) and
+- The FP8 code is all `#if defined(FOLDJET_ENGINE_OPM_FP8)` in `csrc/opm_epilogue.cu` (the default builds preprocess to the same text) and
   the Python hook in `opm_train.outer_product_mean` is a `MODE is not None` check. `scripts/bit.py` (sha1 of y and every gradient of the training step, FP8 switches off), this tree vs the base 1a2bbe42e (= 2.5.14 + inference FP8, FP8 off) in separate processes: 9 / 9 cases identical (64/128 AF3 / Boltz at (256, 1024), (384, 2048), padded (200, 1000) and (192, 512), (128, 4096); 128/256, 128/384, 256/512). Inference outputs were not hashed in this session (the FP8 code is preprocessor-excluded from the default builds).
 - `tests/gpu/test_opm_fp8_train.py` (new, 10 cases): off by default + no leaked state, dO^T plane = dO plane transposed bit for bit
   and dz/n, dbo equal to the default dgrad (e4m3, e5m2), dequantised dO within one FP8 rounding, weight scales = `bound_scales`,
@@ -558,7 +558,7 @@ No NaN / inf; the curves overlap within 0.22 %.
 
 ### Recommendation
 
-Offer `MINIWORLD_OPM_FP8_TRAIN=e4m3` only as an experiment for deep-MSA training (S >= 2048: 0.58-0.72x of the module step) and for
+Offer `FOLDJET_ENGINE_OPM_FP8_TRAIN=e4m3` only as an experiment for deep-MSA training (S >= 2048: 0.58-0.72x of the module step) and for
 L 256-768 at depth 1024 with d_pair 128 / 256 (0.81-0.95x); do not use it at d_pair 384 / 512 or L 128. Gradient error is 7-12x the
 bf16 default's (3-4 % rms); the 300-step distillation curve matches within 0.2 %, but an end-level training run is needed before any
 default.
@@ -572,7 +572,7 @@ default.
 
 ## OuterProductMean rounds 2 + 3 (branch `fp8t3/opm`, base 3.0.1 = origin/main f5be1df46, 2026-11-19)
 
-Everything below is opt-in (`MINIWORLD_OPM_FP8_TRAIN=e4m3`), default OFF; with the switch off the training step is bit-identical to 3.0.1
+Everything below is opt-in (`FOLDJET_ENGINE_OPM_FP8_TRAIN=e4m3`), default OFF; with the switch off the training step is bit-identical to 3.0.1
 (`scratch fp8t3/scripts_opm/bit.py`, 9 / 9 cases: this tree vs a 3.0.1 worktree, separate processes, identical sha1 of y and every gradient).
 
 ### What changed against round 1
@@ -686,7 +686,7 @@ the transient O: all routes fit L 4096 (OOM at 4224); depth: all routes stop at 
 
 ### (2) FP8 storage of O: measured, no-go as a Python-level cast; recompute is the memory lever
 
-`MINIWORLD_OPM_FP8_TRAIN_OSTORE=fp8|recompute|bf16` (default `bf16` = round 3). Step time vs the 3.0.1 default (CUDA graph, same-cubin control, cool / sustained; ctl 1.00 / 1.01-1.04):
+`FOLDJET_ENGINE_OPM_FP8_TRAIN_OSTORE=fp8|recompute|bf16` (default `bf16` = round 3). Step time vs the 3.0.1 default (CUDA graph, same-cubin control, cool / sustained; ctl 1.00 / 1.01-1.04):
 
 | shape | round 3 (`e4m3`) | `fp8` (e4m3 O, chunked torch casts) | `recompute` |
 |---|---|---|---|
@@ -739,7 +739,7 @@ rms is not reachable with single e4m3 products at any scale granularity; a hi + 
 **Result (H100, 8 x 32 widths):** FP8 o / dv / dw (cuBLASLt, operands written by fused producers, do e4m3, delayed per-tensor scales) makes
 the training step (fwd + bwd) **0.85-0.91x** of the 2.5.14 default (cool; 0.88-0.92 sustained) at the registry training shapes; gradient error
 against fp64 rises from 0.3-0.7 % (default) to 2-5 % rms; a synthetic 1000-step distillation ends ~1 % higher in loss. Opt-in only
-(`MINIWORLD_PWA_FP8_TRAIN=1`), default bytes unchanged. The `pwa_wide` (AF3-family) widths are not served (upper bound 4-7 %).
+(`FOLDJET_ENGINE_PWA_FP8_TRAIN=1`), default bytes unchanged. The `pwa_wide` (AF3-family) widths are not served (upper bound 4-7 %).
 
 ### Where the training step's time goes (2.5.14 default, measured)
 
@@ -803,10 +803,10 @@ cost ~0 if fused at equal bytes (vT + v natural e4m3 = v bf16 bytes; do + do^T F
 
 | env / attribute | effect |
 |---|---|
-| `MINIWORLD_PWA_FP8_TRAIN=1` (or `all`; or `MINIWORLD_FP8_TRAIN=1`) / `pwa_fp8_train.PLACES` | FP8 o, dv, dw (fused producers). A subset (`fwd`, `dv`, `dw`, comma list) runs the PyTorch-quantized prototype (ablation only: its quantize passes cost 2+ ms) |
-| `MINIWORLD_PWA_FP8_TRAIN_DO` | `e4m3` (default) or `e5m2` for do |
-| `MINIWORLD_PWA_FP8_TRAIN_MARGIN` / `_HISTORY` | delayed-scale headroom (2) / amax history length (16 calls) |
-| `MINIWORLD_PWA_FP8_TRAIN_IMPL=proto` | PyTorch quantize passes instead of the fused producers |
+| `FOLDJET_ENGINE_PWA_FP8_TRAIN=1` (or `all`; or `FOLDJET_ENGINE_FP8_TRAIN=1`) / `pwa_fp8_train.PLACES` | FP8 o, dv, dw (fused producers). A subset (`fwd`, `dv`, `dw`, comma list) runs the PyTorch-quantized prototype (ablation only: its quantize passes cost 2+ ms) |
+| `FOLDJET_ENGINE_PWA_FP8_TRAIN_DO` | `e4m3` (default) or `e5m2` for do |
+| `FOLDJET_ENGINE_PWA_FP8_TRAIN_MARGIN` / `_HISTORY` | delayed-scale headroom (2) / amax history length (16 calls) |
+| `FOLDJET_ENGINE_PWA_FP8_TRAIN_IMPL=proto` | PyTorch quantize passes instead of the fused producers |
 | `pwa_fp8_train.overflow_count()` / `reset()` | saturated calls since reset (one host sync) / forget the scale histories |
 
 Scope: `pwa_train` widths (d_msa 64, 8 x 32; d_pair 128 / 256 / 384 / 512), H100, N % 128 == 0, N <= 1024, S even. With the switch on the
@@ -925,7 +925,7 @@ Results (job 57855, final tree): `test_pwa_fp8_train.py` 7 passed; `test_pwa_fp8
   15-20 % tensor use; no MMA-bound time to remove (as in the inference study).
 - **Forward contraction at N < 512**: the default's fused `pwa_fwd2/3` forward is replaced by split FP8 + `pwa_gateout`; still a win in the
   step (0.91 at S1024 N384) because the backward gains dominate.
-- Not measured: fast accumulation (`MINIWORLD_PWA_FP8_TRAIN_FASTACC=1` exists, 1-3 % in the inference study), end-level training.
+- Not measured: fast accumulation (`FOLDJET_ENGINE_PWA_FP8_TRAIN_FASTACC=1` exists, 1-3 % in the inference study), end-level training.
 
 ### Recommendation
 
@@ -951,8 +951,8 @@ the step-time benchmark is `tools/fp8_train/pwa_step_bench.py` (+ `run_pwa_step_
 
 | env / attribute | effect |
 |---|---|
-| `MINIWORLD_PWA_FP8_TRAIN=bwd` | **backward-only**: bf16 forward (default numerics), FP8 dv / dw (producers `ln_vt8n -DVT_BF` + `pwa_glue3_f8` + `w_quant_t`) |
-| `MINIWORLD_PWA_FP8_TRAIN_MIN_S` / `pwa_fp8_train.MIN_S` | smallest MSA depth served (default 1024: measured S 1024 .. 4096; below it the default route runs) |
+| `FOLDJET_ENGINE_PWA_FP8_TRAIN=bwd` | **backward-only**: bf16 forward (default numerics), FP8 dv / dw (producers `ln_vt8n -DVT_BF` + `pwa_glue3_f8` + `w_quant_t`) |
+| `FOLDJET_ENGINE_PWA_FP8_TRAIN_MIN_S` / `pwa_fp8_train.MIN_S` | smallest MSA depth served (default 1024: measured S 1024 .. 4096; below it the default route runs) |
 
 Gates (`serves`): H100, N % 128 == 0, N <= 1024, S >= 1024, S even; `bwd` additionally N >= 512 (its forward needs the split head-major
 contraction, N >= 512). Everything else runs the default route (bit-identical, see below).
@@ -1066,7 +1066,7 @@ the smaller dv / dw operand reads; the write side does not shrink (v bf16 + e4m3
 | 768 | 26624 (28672 OOM) | 30720 (32768 OOM) = +15 % | 32768 (34816 OOM) = +23 % |
 | 1024 | 20480 (22528 OOM) | 22528 (24576 OOM) = +10 % | 24576 (26624 OOM) = +20 % |
 
-### 2. FP8 storage of o (`O8`, `MINIWORLD_PWA_FP8_TRAIN_O8=1`, needs `bwd` or `1`; `csrc/pwa_o8.cu`)
+### 2. FP8 storage of o (`O8`, `FOLDJET_ENGINE_PWA_FP8_TRAIN_O8=1`, needs `bwd` or `1`; `csrc/pwa_o8.cu`)
 
 o ([H, N, S*C], head-major) is quantised to e4m3 (delayed per-tensor pow2 scale, amax recorded by the kernel, same site machinery as v / do)
 right before `save_for_backward`, and dequantised to bf16 in the backward just before `pwa_glue3_f8` (freed right after it). **A memory mode, not a speed
@@ -1095,7 +1095,7 @@ more traffic (scale vectors) for no gain. No-go; the delayed per-tensor scale st
 ### 4. The remaining producer gaps
 
 - `ln_vt8` (VT_BF) 335 us: bytes x 100 + y 100 + v bf16 403 + v e4m3 201 = 804 MB = 2.4 TB/s, against `ln_vg`'s 603 MB in 218 us = 2.77 TB/s: ~290 us at the same rate, i.e. ~45 us (1.4 % of the step) left. The stores are 64 B / 32 B row pieces (item = 64 tokens x one s); an item of 2 s would double the pieces (128 B / 64 B) but the smem staging then grows to 96 KiB: not tried, <= 1 % of the step.
-- `pwa_glue3_f8` +46 us over `pwa_glue3`: the byte scatter of do / doT into smem has 4-way bank conflicts; 64B-swizzled staging tiles (TMA SWIZZLE_64B, `MINIWORLD_PWA_FP8_TRAIN_G3SWZ=1`)
+- `pwa_glue3_f8` +46 us over `pwa_glue3`: the byte scatter of do / doT into smem has 4-way bank conflicts; 64B-swizzled staging tiles (TMA SWIZZLE_64B, `FOLDJET_ENGINE_PWA_FP8_TRAIN_G3SWZ=1`)
   gave 664 us against 659: not the cost (the kernel is latency-bound on its o / dout stream); left off. Tile order (round 3): no effect.
 
 ### 5. Step time against the 3.0.1 default (`bench_final4.jsonl`, `tools/fp8_train/pwa_step_bench.py`; same-process interleaved CUDA graphs, ctl = same-cubin control)

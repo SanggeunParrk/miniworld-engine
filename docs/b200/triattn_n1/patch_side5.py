@@ -29,5 +29,5 @@ new = '''        s_c = None
 '''
 assert s.count(old) == 1
 s = s.replace(old, new)
-s = s.replace('int(os.environ.get("MINIWORLD_BIDIR_B200_SIDE", "3"))   # bit 0: the dWo branch, bit 1: the dW branch', 'int(os.environ.get("MINIWORLD_BIDIR_B200_SIDE", "3"))   # bit 0: the dWo branch, bit 1: the dW branch, bit 3 (8): the weight cast beside the LayerNorm forward')
+s = s.replace('int(os.environ.get("FOLDJET_ENGINE_BIDIR_B200_SIDE", "3"))   # bit 0: the dWo branch, bit 1: the dW branch', 'int(os.environ.get("FOLDJET_ENGINE_BIDIR_B200_SIDE", "3"))   # bit 0: the dWo branch, bit 1: the dW branch, bit 3 (8): the weight cast beside the LayerNorm forward')
 open(p, "w").write(s); print("ok")

@@ -1,4 +1,4 @@
-"""FoldForge 5I28 confidence head (APB B > 1): ``AttentionPairBias`` on ``cuda`` serves a batch of B rows (the confidence PairformerBlock's
+"""FoldJet 5I28 confidence head (APB B > 1): ``AttentionPairBias`` on ``cuda`` serves a batch of B rows (the confidence PairformerBlock's
 single attention batched over the diffusion samples) on H100 and A100, inference and training, as one step per batch row inside each op (the A100
 fp32 composed path: its pair backward is one tensor-core launch for the batch, which computes each row as the one-row launch does).
 

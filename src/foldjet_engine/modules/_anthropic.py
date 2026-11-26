@@ -6,7 +6,7 @@ backends.
 
 ``load`` puts ``common/opt_core`` (and ``path``, a release directory) on ``sys.path``, checks the release revision of UPSTREAM.json and the
 sha256 of the imported file against it, and imports. Every failure raises :class:`ReleaseMissing` with the reason; ``missing(...)`` returns
-that reason (or ``None``) for a backend's ``_supports_anthropic``. ``MINIWORLD_ANTHROPIC_ROOT`` overrides the release root.
+that reason (or ``None``) for a backend's ``_supports_anthropic``. ``FOLDJET_ENGINE_ANTHROPIC_ROOT`` overrides the release root.
 """
 
 from __future__ import annotations
@@ -20,6 +20,8 @@ from functools import cache
 from pathlib import Path
 from types import ModuleType
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
+
 #: The release revision the backends were written against (UPSTREAM.json "revision").
 REVISION = "f4f62fa6592ae4938d49b1757bea0cfeff9f468e"
 _THIRD_PARTY = Path(__file__).resolve().parents[3] / "third_party" / "anthropic"
@@ -30,7 +32,7 @@ class ReleaseMissing(RuntimeError):
 
 
 def root() -> Path:
-    return Path(os.environ.get("MINIWORLD_ANTHROPIC_ROOT") or _THIRD_PARTY / "upstream").resolve()
+    return Path(os.environ.get("FOLDJET_ENGINE_ANTHROPIC_ROOT") or _THIRD_PARTY / "upstream").resolve()
 
 
 @cache

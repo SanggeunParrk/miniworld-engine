@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Modified by MiniWorld Engine from Anthropic's uplifting-biomolecular-modeling@f4f62fa6, common/opt_core/opt_core/kernels/trimul/native/pkg/v5/python/trimul_native/kernel.py (Apache-2.0; see licenses/THIRD_PARTY_NOTICES.md).
+# Modified by FoldJet Engine from Anthropic's uplifting-biomolecular-modeling@f4f62fa6, common/opt_core/opt_core/kernels/trimul/native/pkg/v5/python/trimul_native/kernel.py (Apache-2.0; see licenses/THIRD_PARTY_NOTICES.md).
 """Launch wrappers of the trimul_native kernels (csrc/tmn_kernels.cuh): kernel selection by name from the tile table, tensor-map encoding, the
 by-value parameter blocks (K1Params / K3Params) as pointer-patched ArgPacks, persistent-grid launches through launch.py (CUDA driver).
 
@@ -12,6 +12,7 @@ Kernel names (csrc/tmn_sm90_unit.cuh):  tmn_k1_z<CZ>_h<CH>_<b|f>_t<BI>x<BJ>_s<NS
 numerics statement, 2/3 = reference-order LayerNorms (bitwise variant), 4 = trimul_tx 1.2's arithmetic (comparison only).)
 """
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
 import os
 
 import torch

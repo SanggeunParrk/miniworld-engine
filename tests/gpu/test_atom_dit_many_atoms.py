@@ -1,4 +1,4 @@
-"""The atom DiT ``cuda`` backend past 8192 atoms (FoldForge's 5I28 benchmark: 12288 / 16384 atoms) matches the ``pytorch`` reference.
+"""The atom DiT ``cuda`` backend past 8192 atoms (FoldJet's 5I28 benchmark: 12288 / 16384 atoms) matches the ``pytorch`` reference.
 
 Regression (2026-11-12): on H100 the split conditioning kernel (sm90_atom ``cond90_split``) ran its CTA's units 8 .. 15 on LN(c) when the
 launcher split the 16 weight units in two (grid.y 2 at 132 .. 263 row tiles = 8448 .. 16832 rows), so the out gates (so, st) of every

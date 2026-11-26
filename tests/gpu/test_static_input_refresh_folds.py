@@ -1,4 +1,4 @@
-"""FoldForge R26 on the grouped multi-fold sampler layout (FoldForge R18, ``foldforge.models.grouped.GroupedSampler``): one sampler CUDA
+"""FoldJet R26 on the grouped multi-fold sampler layout (FoldJet R18, ``foldjet.models.grouped.GroupedSampler``): one sampler CUDA
 graph per shape, reused across fold sets (``foldjet_engine.capture.refresh_static_inputs``).
 
 The grouped step runs the DiT blocks once over ``[S, F, ...]``: F folds (trunk_seeds) x S samples, each fold with its own pair, its own
@@ -48,7 +48,7 @@ def _init(module):
 
 
 class GroupedStep(torch.nn.Module):
-    """One grouped sampler step on static inputs, laid out as FoldForge's ``GroupedSampler`` calls the blocks: ``x`` [S, F, ., d], the
+    """One grouped sampler step on static inputs, laid out as FoldJet's ``GroupedSampler`` calls the blocks: ``x`` [S, F, ., d], the
     per-fold conditioning [1, F, ., d] expanded over S at every call, the folds' pairs [F, ...], one key mask expanded over F (once)."""
 
     def __init__(self, token_key: str, atom_key: str, n_atoms: int, folds: int = F):
@@ -60,10 +60,10 @@ class GroupedStep(torch.nn.Module):
         self.atom = _init(AtomDiTStack(atom_key, 2, backend="cuda"))
         self.f, self.n = folds, n_atoms
         a = self.write_folds(1, fresh=True)
-        # the static tensors (FoldForge: the stacked acts, single_cond rows, pair_all, km_all, the atom queries, cond_enc, atom_pair, atom_km)
+        # the static tensors (FoldJet: the stacked acts, single_cond rows, pair_all, km_all, the atom queries, cond_enc, atom_pair, atom_km)
         self.x_tok, self.c_tok, self.z_tok, self.m_tok = a["x_tok"], a["c_tok"], a["z_tok"], a["m_tok"]
         self.x_atom, self.c_atom, self.z_atom, self.m_atom = a["x_atom"], a["c_atom"], a["z_atom"], a["m_atom"]
-        self.km_tok = self.m_tok.expand(folds, L)  # one key mask expanded over the folds, made once (FoldForge ``km_all``)
+        self.km_tok = self.m_tok.expand(folds, L)  # one key mask expanded over the folds, made once (FoldJet ``km_all``)
         self.km_atom = self.m_atom.expand(folds, n_atoms)
 
     def _draw(self, seed: int, folds: int | None = None) -> dict[str, torch.Tensor]:

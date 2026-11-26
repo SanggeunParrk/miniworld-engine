@@ -14,13 +14,15 @@ Chain (the rows engine of ``sm80_wide._original_forward_ops``, inference, gated 
     out projection                          unchanged
 
 64-channel heads (kind ``d64``: Chai-1's trunk / confidence head, ``sm80_wide.variant_forward_ops``; ``serves_d64`` / ``route(..., hd=64)``): the same chain with HD 64 tiles, q / k
-bf16 (as the H100 d64 route; e4m3 q / k opt-in ``MINIWORLD_TRIATTN_SM120_FP8_D64_QK=1``), the gate in the core's epilogue instead of ``gate_rows``, from L ``D64_MIN_L``.
+bf16 (as the H100 d64 route; e4m3 q / k opt-in ``FOLDJET_ENGINE_TRIATTN_SM120_FP8_D64_QK=1``), the gate in the core's epilogue instead of ``gate_rows``, from L ``D64_MIN_L``.
 
-Guard: ``sync`` (eager calls: a saturated V redoes the call after widening the scale) or ``lazy`` (inside a capture / ``MINIWORLD_TRIATTN_SM120_FP8_GUARD=lazy``: the flag is read
+Guard: ``sync`` (eager calls: a saturated V redoes the call after widening the scale) or ``lazy`` (inside a capture / ``FOLDJET_ENGINE_TRIATTN_SM120_FP8_GUARD=lazy``: the flag is read
 by ``fp8.check()`` outside the graph, the scale is widened in place so captured graphs follow); a capture of an uncalibrated site runs the default route.
 """
 
 from __future__ import annotations
+
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
 
 import functools
 import hashlib
@@ -41,19 +43,19 @@ STATS = _hs.STATS  # one counter dict for every arch: fp8.route_stats()["triattn
 STATS.setdefault("capture_fallbacks", 0)
 STATS.setdefault("fallbacks", 0)
 STATS.setdefault("retries", 0)
-GUARD = os.environ.get("MINIWORLD_TRIATTN_SM120_FP8_GUARD", "sync")
+GUARD = os.environ.get("FOLDJET_ENGINE_TRIATTN_SM120_FP8_GUARD", "sync")
 HEADROOM = 4.0  # V scale: |v| * vinv <= 448 / HEADROOM at the calibration absmax
 QK_HEADROOM = 2.0  # q / k scales: |q| / sq, |k| sq <= 448 / QK_HEADROOM at the calibration absmax (the H100 FP8_QK_HEADROOM)
 #: smallest L the e4m3 core takes (below it the default core runs): measured same-process A-B, docs/fp8.md "RTX 5090"
-QK = os.environ.get("MINIWORLD_TRIATTN_SM120_FP8_QK", "1") != "0"  # e4m3 q / k where the model whitelist has them (the fused d_pair-128 kind)
-MIN_L = int(os.environ.get("MINIWORLD_TRIATTN_SM120_FP8_MINL", "640"))
+QK = os.environ.get("FOLDJET_ENGINE_TRIATTN_SM120_FP8_QK", "1") != "0"  # e4m3 q / k where the model whitelist has them (the fused d_pair-128 kind)
+MIN_L = int(os.environ.get("FOLDJET_ENGINE_TRIATTN_SM120_FP8_MINL", "640"))
 #: the PV-only core (no e4m3 q / k: the unfused kinds, QK off, or a site whose q / k saturated) is 0.97-1.05x of the default on the 5090 (same-process A-B, docs/fp8.md
-#: "RTX 5090"): off unless MINIWORLD_TRIATTN_SM120_FP8_PVONLY=1; without it such calls run the default core
-PV_ONLY = os.environ.get("MINIWORLD_TRIATTN_SM120_FP8_PVONLY", "0") == "1"
+#: "RTX 5090"): off unless FOLDJET_ENGINE_TRIATTN_SM120_FP8_PVONLY=1; without it such calls run the default core
+PV_ONLY = os.environ.get("FOLDJET_ENGINE_TRIATTN_SM120_FP8_PVONLY", "0") == "1"
 #: 64-channel heads (kind ``d64``: Chai-1's trunk / confidence head, ``sm80_wide.variant_forward_ops``): smallest L the e4m3 core takes (same-process A-B, docs/fp8.md "RTX 5090")
-D64_MIN_L = int(os.environ.get("MINIWORLD_TRIATTN_SM120_FP8_D64_MINL", "256"))
+D64_MIN_L = int(os.environ.get("FOLDJET_ENGINE_TRIATTN_SM120_FP8_D64_MINL", "256"))
 #: e4m3 q / k on the 64-channel core (the H100 d64 route keeps q / k in fp16; docs/fp8.md "RTX 5090": accuracy decides)
-D64_QK = os.environ.get("MINIWORLD_TRIATTN_SM120_FP8_D64_QK", "0") == "1"
+D64_QK = os.environ.get("FOLDJET_ENGINE_TRIATTN_SM120_FP8_D64_QK", "0") == "1"
 _DELEGATED = frozenset({"FP8_PV", "FP8_PV_FUSED", "FP8_PV_UNFUSED", "FP8_PV_D64", "FP8_PV_HL", "FP8_VSCALE_AUTO", "FP8_PV_MIN_S", "FP8_PV_FRONT_MIN_S", "FP8_QK"})
 
 

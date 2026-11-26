@@ -1,4 +1,4 @@
-"""RTX 5090: the opt-in e4m3 OuterProductMean (opm_fp8_sm120, MINIWORLD_OPM_FP8=bound) and PWA (pwa_fp8_sm120, MINIWORLD_PWA_FP8=1) routes against the
+"""RTX 5090: the opt-in e4m3 OuterProductMean (opm_fp8_sm120, FOLDJET_ENGINE_OPM_FP8=bound) and PWA (pwa_fp8_sm120, FOLDJET_ENGINE_PWA_FP8=1) routes against the
 default route, same process, alternating A-B; and their error against the module in float64 (docs/fp8.md "RTX 5090", OPM / PWA).
 
     python msa_ab.py [--rounds 6] [--err] [--noab] [--nogate] opm:cm:cz:L:S[:a] ... pwa:D:C:cz:S:N ...

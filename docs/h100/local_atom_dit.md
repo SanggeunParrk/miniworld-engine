@@ -182,7 +182,7 @@ bf16 3.50 ms, fp32 5.81 ms.
 
 ## FP8 (experimental, opt-in)
 
-`local_dit_h100.FP8_ROWS` (`MINIWORLD_ATOMDIT_FP8=1|pre|post`, default off): the bf16 inference forward with a shared conditioning runs `pre90` /
+`local_dit_h100.FP8_ROWS` (`FOLDJET_ENGINE_ATOMDIT_FP8=1|pre|post`, default off): the bf16 inference forward with a shared conditioning runs `pre90` /
 `post90`'s products on e4m3 wgmma (`sm90_atom/pre90_f8.cu`, `post90_f8.cu`, `f8w90.cuh`, `f8.py`; per-row power-of-two activation scales, per-unit
 weight scales). 3-10 % of the block step, 6-11x the bf16 tolerance (pre only: 1.6-2.7x). Analysis, numbers and limits: [../fp8.md](../fp8.md),
 "Atom DiT forward".

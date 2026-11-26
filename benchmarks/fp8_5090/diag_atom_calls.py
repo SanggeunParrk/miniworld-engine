@@ -1,4 +1,4 @@
-"""Diagnostics: every e4m3 atom DiT block call of a FoldForge predictor run (route_census.py arguments after ``--``), checked against the default block
+"""Diagnostics: every e4m3 atom DiT block call of a FoldJet predictor run (route_census.py arguments after ``--``), checked against the default block
 on the same inputs: per call M / N / A / table rows, finite flags, max |y8 - y| / max |y|, and for a non-finite call the part (pre / post) that makes it
 and the input / table ranges. Run eagerly (``--no-compile``) so every call passes through Python.
 
@@ -9,9 +9,9 @@ import os
 import runpy
 import sys
 
-for key in [k for k in os.environ if k.startswith("MINIWORLD_") and "FP8" in k]:
+for key in [k for k in os.environ if k.startswith("FOLDJET_ENGINE_") and "FP8" in k]:
     os.environ.pop(key)
-os.environ["MINIWORLD_FP8"] = "safe"
+os.environ["FOLDJET_ENGINE_FP8"] = "safe"
 
 import torch  # noqa: E402
 

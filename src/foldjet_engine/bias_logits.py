@@ -19,7 +19,7 @@ The switch (per module, else process wide, else the environment, else ``"fp32"``
 
     block.set_pair_bias_logits("bf16")          # one TokenDiTMiniWorldBiasOnly (or BiasOnlyAttention); None: follow the process default
     foldjet_engine.bias_logits.set_default("bf16")   # every module that has not set its own; None: back to the environment
-    MINIWORLD_BIAS_LOGITS=bf16 python run.py     # the environment default (read at each call)
+    FOLDJET_ENGINE_BIAS_LOGITS=bf16 python run.py     # the environment default (read at each call)
     with foldjet_engine.bias_logits.scope("bf16"): ...   # a block of code
 
 :func:`pair_bias_all` follows the mode of its first block. The ``fp32`` mode is bit-identical to the engine before the switch existed, and the
@@ -34,7 +34,9 @@ from collections.abc import Iterator
 
 import torch
 
-ENV = "MINIWORLD_BIAS_LOGITS"
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
+
+ENV = "FOLDJET_ENGINE_BIAS_LOGITS"
 MODES = ("fp32", "bf16")
 _DEFAULT: list[str | None] = [None]
 
@@ -47,7 +49,7 @@ def _check(mode: str, where: str) -> str:
 
 
 def default() -> str:
-    """The process default: :func:`set_default`'s, else ``MINIWORLD_BIAS_LOGITS`` (``fp32`` / ``bf16``; empty = unset), else ``"fp32"``."""
+    """The process default: :func:`set_default`'s, else ``FOLDJET_ENGINE_BIAS_LOGITS`` (``fp32`` / ``bf16``; empty = unset), else ``"fp32"``."""
     if _DEFAULT[0] is not None:
         return _DEFAULT[0]
     v = os.environ.get(ENV, "").strip()
@@ -55,7 +57,7 @@ def default() -> str:
 
 
 def set_default(mode: str | None) -> None:
-    """Process-wide default for every module that has not set its own; ``None`` hands it back to ``MINIWORLD_BIAS_LOGITS``."""
+    """Process-wide default for every module that has not set its own; ``None`` hands it back to ``FOLDJET_ENGINE_BIAS_LOGITS``."""
     _DEFAULT[0] = None if mode is None else _check(mode, "set_default")
 
 

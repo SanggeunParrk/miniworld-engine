@@ -1,6 +1,6 @@
-"""The lifetime of the token DiT's hoisted pair bias (``kernels/conditioned_transition/cuda``, ``kernels._capture``), FoldForge 5I28 OpenDDE n = 16.
+"""The lifetime of the token DiT's hoisted pair bias (``kernels/conditioned_transition/cuda``, ``kernels._capture``), FoldJet 5I28 OpenDDE n = 16.
 
-FoldForge captures one sampler graph per fold under ``static_weights()`` + ``static_inputs()``, never refreshes it, and drops the handle; after the
+FoldJet captures one sampler graph per fold under ``static_weights()`` + ``static_inputs()``, never refreshes it, and drops the handle; after the
 fold it drops its pair and calls ``release_dead_inputs``. Before the fix the refresh records of that capture (one per block, held globally) kept the
 pair and every block's bias alive for good: 3.75 GiB of pair conditioning and 24 x 0.47 GiB of biases per fold at 3968 structural tokens, through
 the next fold's trunk. Checked here on the real H100 path:
@@ -81,7 +81,7 @@ def test_dropped_capture_handle_frees_the_fold_with_its_pair():
     base = torch.cuda.memory_allocated()
     gone = StorageWeakRef(held["pair"].untyped_storage())
     with torch.no_grad():
-        with static_weights(), static_inputs():  # the handle is not kept: FoldForge's sampler graph
+        with static_weights(), static_inputs():  # the handle is not kept: FoldJet's sampler graph
             side = torch.cuda.Stream()
             side.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(side):

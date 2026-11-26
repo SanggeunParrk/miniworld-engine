@@ -1,6 +1,6 @@
 """The key mask as the attention cores read it to skip the dead key tiles of a padded tail.
 
-A FoldForge call pads its token / atom count to a bucket: mask True for the first n live positions, False after. The keys past the
+A FoldJet call pads its token / atom count to a bucket: mask True for the first n live positions, False after. The keys past the
 last attended one are masked in every query row; once a row has seen a live key its running max is a live logit, so their
 exponentials are exact zeros and they add nothing to the sum or the output. A core that stops its key loop at the tile holding the
 last attended key gives the same bits with fewer tiles. The cores read the mask bytes themselves (``augmented_attention/cuda/

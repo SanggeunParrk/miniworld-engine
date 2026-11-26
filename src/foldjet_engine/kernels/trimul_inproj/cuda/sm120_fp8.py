@@ -11,12 +11,14 @@ Chain (the 5090 wide chain of ``sm80_wide`` with two stages swapped)::
 
 Quantisation recipe = the H100 / B200 routes': ONLY the planes a / b are e4m3, one power-of-two scale per tensor (a, b), calibrated on the first eager call of a
 module from the exact amax of the plane values (a probe launch of the front with qinv = 1), then HEADROOM x and static (cached per module, dropped with its weight);
-guard: ``sync`` (eager: redo an overflowing call after raising the scales) or ``lazy`` (capture / ``MINIWORLD_TRIMUL_FP8_GUARD=lazy``: the peak is read by
+guard: ``sync`` (eager: redo an overflowing call after raising the scales) or ``lazy`` (capture / ``FOLDJET_ENGINE_TRIMUL_FP8_GUARD=lazy``: the peak is read by
 :func:`overflow_peak` outside the graph, scales updated in place so captured graphs follow); a capture before any calibration runs the default route.
 Same interface as the H100 module of the slot (``POLICY`` / ``GUARD`` / ``GUARD_STATS`` / ``overflow_peak`` / ``rescale_all``).
 """
 
 from __future__ import annotations
+
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
 
 import ctypes
 import math
@@ -29,10 +31,10 @@ from foldjet_engine.fp8 import env as _fp8_env
 
 E4M3_MAX = 448.0
 SCALE_FLOOR = 2.0**-30
-POLICY = _fp8_env("MINIWORLD_TRIMUL_FP8") or None  # None = off; "calib" = static scales; "dynamic" = exact amax every call
-GUARD = os.environ.get("MINIWORLD_TRIMUL_FP8_GUARD", "sync")  # "sync" | "lazy" | "off"
-HEADROOM = float(os.environ.get("MINIWORLD_TRIMUL_FP8_HEADROOM", "16"))
-_MINL_ENV = os.environ.get("MINIWORLD_TRIMUL_FP8_MINL")
+POLICY = _fp8_env("FOLDJET_ENGINE_TRIMUL_FP8") or None  # None = off; "calib" = static scales; "dynamic" = exact amax every call
+GUARD = os.environ.get("FOLDJET_ENGINE_TRIMUL_FP8_GUARD", "sync")  # "sync" | "lazy" | "off"
+HEADROOM = float(os.environ.get("FOLDJET_ENGINE_TRIMUL_FP8_HEADROOM", "16"))
+_MINL_ENV = os.environ.get("FOLDJET_ENGINE_TRIMUL_FP8_MINL")
 #: smallest L the e4m3 chain takes (below it the default route runs): measured same-process A-B, docs/fp8.md "RTX 5090"
 MIN_L = 256
 #: d_pair widths of the route (D64: the template stacks, D512: IntelliFold2's trunk, both added on 5090-int 2026-11-23 as on the H100: k1w8 with the

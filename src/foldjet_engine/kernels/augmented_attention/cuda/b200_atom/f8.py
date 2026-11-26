@@ -3,10 +3,12 @@
 The H100 route (``sm90_atom/f8.py``: ``pre90_f8`` / ``post90_f8``) on tcgen05: ``pre_fwd.cu -DF8=1`` (this file's ``pre_fwd`` / ``pre_fwd_kv``) -- x1 (and the
 K / V AdaLN's xkv) leave the AdaLN threads as e4m3 with a dynamic per-row scale, the projections run on ``kind::f8f6f4`` with the weights (e4m3,
 static per-output-channel scale) in TMEM, the epilogue scales the fp32 accumulator by sx[row] sw[channel].  Nothing here changes a default
-route: ``ENABLED`` is empty unless ``MINIWORLD_ATOMDIT_FP8_B200`` / ``enable()`` names a stage.
+route: ``ENABLED`` is empty unless ``FOLDJET_ENGINE_ATOMDIT_FP8_B200`` / ``enable()`` names a stage.
 """
 
 from __future__ import annotations
+
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
 
 import os
 
@@ -50,10 +52,10 @@ def enable(v) -> frozenset:
     return old
 
 
-ENABLED = _parse(os.environ.get("MINIWORLD_ATOMDIT_FP8_B200", ""))
-MIN_ROWS = int(os.environ.get("MINIWORLD_ATOMDIT_FP8_B200_MIN_ROWS", "0"))
+ENABLED = _parse(os.environ.get("FOLDJET_ENGINE_ATOMDIT_FP8_B200", ""))
+MIN_ROWS = int(os.environ.get("FOLDJET_ENGINE_ATOMDIT_FP8_B200_MIN_ROWS", "0"))
 #: row ceiling (rows M = A F N): the block loses 1.5-6 % of its time above ~2048 atoms x 5 samples (docs/b200/fp8.md, "Agent E"); 10240 = 2048 atoms x 5
-MAX_ROWS = int(os.environ.get("MINIWORLD_ATOMDIT_FP8_B200_MAX_ROWS", "10240"))
+MAX_ROWS = int(os.environ.get("FOLDJET_ENGINE_ATOMDIT_FP8_B200_MAX_ROWS", "10240"))
 
 
 def serves(stage: str, rows: int, save: bool) -> bool:

@@ -1,10 +1,10 @@
 """OPT-IN FP8 (e4m3) inference forward of the Transition on B200 (sm_100a): D a multiple of 128 up to 1024, n 2 / 4 (docs/b200/fp8.md).
 
-Off by default: with ``MINIWORLD_TRANSITION_FP8`` unset (and ``MINIWORLD_FP8`` off) nothing here runs and every Transition call takes the B200 default
+Off by default: with ``FOLDJET_ENGINE_TRANSITION_FP8`` unset (and ``FOLDJET_ENGINE_FP8`` off) nothing here runs and every Transition call takes the B200 default
 route (``route_sm100a``), bit-identical to the tree without this module. The switch is the one the H100 route reads (``fp8.PRESETS``), so
-``MINIWORLD_FP8=safe`` / ``engine-fp8`` turn this route on at capability (10, 0) as well.
+``FOLDJET_ENGINE_FP8=safe`` / ``engine-fp8`` turn this route on at capability (10, 0) as well.
 
-The recipe is the H100 one (``fp8_sm90a.py``, docs/fp8.md "Transition forward"), on tcgen05 kernels. D 128 / 256 (n 2 / 4; ``MINIWORLD_TRANSITION_FP8_FUSED``): ONE fused 2-CTA kernel
+The recipe is the H100 one (``fp8_sm90a.py``, docs/fp8.md "Transition forward"), on tcgen05 kernels. D 128 / 256 (n 2 / 4; ``FOLDJET_ENGINE_TRANSITION_FP8_FUSED``): ONE fused 2-CTA kernel
 (``sm100/fp8/tr8_fwd_sm100.cu``: LayerNorm -> e4m3 xn, expand + SwiGLU with e4m3 h in tensor memory, squeeze from tensor memory, residual; docs/b200/fp8.md section 8); the other widths in three launches (PDL chain):
 
 1. ``tf8_ln`` (``sm100/fp8/tf8_ln.cu``): fp32 LayerNorm, xn quantized straight to e4m3 (one power-of-two scale ``sx`` from the LayerNorm bound
@@ -18,11 +18,13 @@ first eager call of a module (probe call with sh = 1: the pre-cast peak is exact
 planes (``overflow_peak`` / ``rescale_all`` / ``fp8.check()``; ``sync`` guard redoes an overflowing eager call, ``lazy`` records the peak, also under
 CUDA-graph capture). Scale floors: amax >= 1e-12 (stricter than H100's 1e-30: a scale product must stay finite in fp32).
 
-Environment (read at import): ``MINIWORLD_TRANSITION_FP8=calib``; ``_GUARD`` sync | lazy | off; ``_HEADROOM`` (16); ``_MINROWS`` (replaces ``ROW_GATE``);
+Environment (read at import): ``FOLDJET_ENGINE_TRANSITION_FP8=calib``; ``_GUARD`` sync | lazy | off; ``_HEADROOM`` (16); ``_MINROWS`` (replaces ``ROW_GATE``);
 ``_WIDTHS``; ``_FUSED`` (widths on the fused kernel, default 128,256), ``_FUSED_FLAGS`` (extra nvcc flags of its builds), ``_PAIRB`` (chain GEMMs on 2-CTA clusters sharing B by multicast).
 """
 
 from __future__ import annotations
+
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
 
 import functools
 import math
@@ -37,10 +39,10 @@ from ..._compile import opaque
 from ..._device import num_sms
 from .fused_sm100a import _ext, build_cubins
 
-POLICY = _fp8_env("MINIWORLD_TRANSITION_FP8") or None  # None = off; "calib" = static h scale calibrated on the first eager call
-GUARD = os.environ.get("MINIWORLD_TRANSITION_FP8_GUARD", "sync")
-HEADROOM = float(os.environ.get("MINIWORLD_TRANSITION_FP8_HEADROOM", "16"))
-_MINROWS_ENV = os.environ.get("MINIWORLD_TRANSITION_FP8_MINROWS")
+POLICY = _fp8_env("FOLDJET_ENGINE_TRANSITION_FP8") or None  # None = off; "calib" = static h scale calibrated on the first eager call
+GUARD = os.environ.get("FOLDJET_ENGINE_TRANSITION_FP8_GUARD", "sync")
+HEADROOM = float(os.environ.get("FOLDJET_ENGINE_TRANSITION_FP8_HEADROOM", "16"))
+_MINROWS_ENV = os.environ.get("FOLDJET_ENGINE_TRANSITION_FP8_MINROWS")
 MIN_ROWS: int | None = int(_MINROWS_ENV) if _MINROWS_ENV else None
 #: smallest row count routed per (D, n) (below it, and for a (D, n) not listed, the B200 default route runs). Measured on the B200 (docs/b200/fp8.md, same-process
 #: interleaved A/B against the default route, graph medians and sustained, idle gap 0.15 s): D 512 n 4 x0.50 at 1024 rows .. 0.77 at 65536+; D 512 n 2 x0.63 at 4096,
@@ -48,7 +50,7 @@ MIN_ROWS: int | None = int(_MINROWS_ENV) if _MINROWS_ENV else None
 #: D 128 / 256 run the FUSED one-kernel forward (tr8_fwd_sm100.cu, section 8 of docs/b200/fp8.md): D 128 n 4 sustained x1.00 at 16384 rows, 0.95 at 65536, 0.85-0.86 from 147456 (energy
 #: x0.83-0.86); D 128 n 2 x0.93 at 65536, 0.87-0.94 from 147456; D 256 n 4 x0.92 at 4096-16384, 0.83-0.84 from 65536 (energy x0.73-0.83).
 #: Not routed by default (no gain or a loss, measured with the built kernels): D 128 n 2 below 65536 rows (x1.00, energy x0.88-0.95), D 256 n 2 (sustained x1.00-1.09 to 0.95, cool graph 1.00-1.11),
-#: D 384 (chain x0.99-1.05 at 65536-262144 rows n 4, 1.16 n 2, 1.5 at 1024). ``MINIWORLD_TRANSITION_FP8_MINROWS`` + ``_WIDTHS`` switch them on for experiments.
+#: D 384 (chain x0.99-1.05 at 65536-262144 rows n 4, 1.16 n 2, 1.5 at 1024). ``FOLDJET_ENGINE_TRANSITION_FP8_MINROWS`` + ``_WIDTHS`` switch them on for experiments.
 #: D 128 (2026-11-23, re-measured on a B200 through the measure harness, master inference, graph replay, 5 interleaved rounds, two separate
 #: sweeps of 16 sizes, rows = L^2 of a [1, L, L, 128] pair; ratio = e4m3 / default): n 2 0.91-0.96 from 65536 to 1327104 rows in both sweeps, 1.00 below
 #: 65536, 0.96-1.05 flipping between the sweeps from 1638400; n 4 0.96-0.98 from 147456 to 1048576 (one 1.04 at 409600), 0.98-1.00 below,
@@ -60,7 +62,7 @@ ROW_MAX = {(256, 2): 8192, (128, 4): 1179648, (128, 2): 1474560}
 #: smallest row count at which the FUSED kernel runs a (D, n) (below it the 3-launch chain: the fused kernel has a ~24.6 us floor at D 256 n 4 below ~12000 rows where the chain takes 14.4 us at 1024 rows .. 22.7 us at 8192
 #: against the default 26.7 us): D 256 n 4 12288, D 256 n 2 never (chain below ROW_MAX, default above). D 128: fused from its gate.
 FUSED_MIN_ROWS = {(256, 4): 12288, (256, 2): 1 << 60}
-WIDTHS = tuple(int(w) for w in os.environ.get("MINIWORLD_TRANSITION_FP8_WIDTHS", "128,256,512,768").split(",") if w)
+WIDTHS = tuple(int(w) for w in os.environ.get("FOLDJET_ENGINE_TRANSITION_FP8_WIDTHS", "128,256,512,768").split(",") if w)
 PDL = True
 E4M3_MAX = 448.0
 AMAX_FLOOR = 1e-12
@@ -68,10 +70,10 @@ GUARD_STATS = {"calls": 0, "retries": 0, "fallbacks": 0, "capture_fallbacks": 0,
 _CACHES: dict = {}  # per module (key: data_ptr of expand_a's weight; dropped when that tensor is freed)
 _LAZY: dict = {}
 
-FUSED_WIDTHS = tuple(int(w) for w in os.environ.get("MINIWORLD_TRANSITION_FP8_FUSED", "128,256").split(",") if w)  # widths run by the fused one-kernel e4m3 forward (tr8_fwd_sm100.cu); the others (and unlisted) the 3-launch chain
-_FUSED_FLAGS = tuple(os.environ.get("MINIWORLD_TRANSITION_FP8_FUSED_FLAGS", "").split())  # extra nvcc flags of the fused builds (experiments: -DSIG=1 -DNXS_=3 ...)
+FUSED_WIDTHS = tuple(int(w) for w in os.environ.get("FOLDJET_ENGINE_TRANSITION_FP8_FUSED", "128,256").split(",") if w)  # widths run by the fused one-kernel e4m3 forward (tr8_fwd_sm100.cu); the others (and unlisted) the 3-launch chain
+_FUSED_FLAGS = tuple(os.environ.get("FOLDJET_ENGINE_TRANSITION_FP8_FUSED_FLAGS", "").split())  # extra nvcc flags of the fused builds (experiments: -DSIG=1 -DNXS_=3 ...)
 
-PAIRB = os.environ.get("MINIWORLD_TRANSITION_FP8_PAIRB", "0") == "1"  # chain GEMMs on 2-CTA clusters sharing the B tile by multicast (tf8_gemm.cu PAIRB): A/B experiment, off by default
+PAIRB = os.environ.get("FOLDJET_ENGINE_TRANSITION_FP8_PAIRB", "0") == "1"  # chain GEMMs on 2-CTA clusters sharing the B tile by multicast (tf8_gemm.cu PAIRB): A/B experiment, off by default
 
 _SPECS = (
     ("f128n4", "fp8/tr8_fwd_sm100.cu", ("-DHID=512", *_FUSED_FLAGS)),

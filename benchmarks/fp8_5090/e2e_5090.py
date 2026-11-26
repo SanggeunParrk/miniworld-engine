@@ -1,10 +1,10 @@
-"""RTX 5090 end level of the whole ``engine-fp8`` set (``MINIWORLD_FP8=safe`` + ``MINIWORLD_FP8_MODEL``) against bf16, per TRUNK seed: the H100 protocol of
-docs/fp8.md "End level" (FoldForge ``miniworld`` backend, bf16, eager, bucketing, 200 steps, diffusion_seed 0, 1 sample, trunk seeds 0-3; acceptance =
+"""RTX 5090 end level of the whole ``engine-fp8`` set (``FOLDJET_ENGINE_FP8=safe`` + ``FOLDJET_ENGINE_FP8_MODEL``) against bf16, per TRUNK seed: the H100 protocol of
+docs/fp8.md "End level" (FoldJet ``miniworld`` backend, bf16, eager, bucketing, 200 steps, diffusion_seed 0, 1 sample, trunk seeds 0-3; acceptance =
 max same-seed RMSD of FP8 vs bf16 <= max(1.1 x the largest bf16 trunk-seed-pair RMSD, 0.5 A); analysis ``e2e_5090_an.py``).
 
     python e2e_5090.py --model af3 --arm bf16|fp8 --out DIR --specs DIR TARGET ...  [--seeds 0 1 2 3] [--deadline SECONDS]
 
-One process per (model, arm): the arm's environment is set before the engine is imported (as FoldForge's ``ffpaper.apply_arm_env``, guards ``sync``:
+One process per (model, arm): the arm's environment is set before the engine is imported (as FoldJet's ``ffpaper.apply_arm_env``, guards ``sync``:
 an eager redo of a saturating call). FP8 arm: ``fp8.check()`` after every forward (a saturation of a lazy route: the forward is redone, at most 2 times)
 and the route counters per case. Resumable: one .pt (coords, plddt, ptm, iptm) + .json per finished case."""
 
@@ -25,22 +25,22 @@ ap.add_argument("--out", type=Path, required=True)
 ap.add_argument("--specs", type=Path, required=True)
 ap.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2, 3])
 ap.add_argument("--deadline", type=float, default=1e9, help="stop starting new cases after this many seconds (resumable)")
-ap.add_argument("--env", action="append", default=[], help="K=V set after the arm environment (ablations, e.g. MINIWORLD_TRANSITION_FP8= to switch one route off)")
+ap.add_argument("--env", action="append", default=[], help="K=V set after the arm environment (ablations, e.g. FOLDJET_ENGINE_TRANSITION_FP8= to switch one route off)")
 ap.add_argument("--tag", default=None, help="case name prefix instead of the arm (ablation runs: <tag>_t<seed>)")
 ap.add_argument("targets", nargs="+")
 args = ap.parse_args()
-for key in [k for k in os.environ if k.startswith("MINIWORLD_") and "FP8" in k]:
+for key in [k for k in os.environ if k.startswith("FOLDJET_ENGINE_") and "FP8" in k]:
     os.environ.pop(key)
 if args.arm == "fp8":
-    os.environ["MINIWORLD_FP8"] = "safe"
-    os.environ["MINIWORLD_FP8_MODEL"] = args.model
+    os.environ["FOLDJET_ENGINE_FP8"] = "safe"
+    os.environ["FOLDJET_ENGINE_FP8_MODEL"] = args.model
 for kv in args.env:
     k, v = kv.split("=", 1)
     os.environ[k] = v
 
 import torch  # noqa: E402
 
-import foldforge as ff  # noqa: E402
+import foldjet as ff  # noqa: E402
 from foldjet_engine import fp8  # noqa: E402
 
 T0 = time.time()

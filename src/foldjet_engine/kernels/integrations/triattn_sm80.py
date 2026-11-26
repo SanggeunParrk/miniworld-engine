@@ -265,7 +265,7 @@ def forward(module, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tens
     if kind is not None and kind[0] == "wide":
         from foldjet_engine.kernels.triangle_attention.cuda import sm80_wide
 
-        # L not a multiple of 128, or a whole-pair front output past sm80_wide.ROWS_BLOCKED_BYTES (FoldForge OpenDDE's refiner: 2976 / 3968
+        # L not a multiple of 128, or a whole-pair front output past sm80_wide.ROWS_BLOCKED_BYTES (FoldJet OpenDDE's refiner: 2976 / 3968
         # tokens at d_pair 384): blocks of the attended frame's rows, at L padded to a multiple of 128
         call = sm80_wide.forward_rows if sm80_wide.rows_blocked(pair, kind[1]) else sm80_wide.forward
         return call(

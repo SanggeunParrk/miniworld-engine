@@ -1,6 +1,6 @@
 """EXPERIMENTAL, opt-in (off by default): the PWA key contraction ``o_h = w_h v_h`` with e4m3 operands on H100 (cuBLASLt).
 
-Nothing here runs unless the caller asks for it (``ENABLED`` / ``MINIWORLD_PWA_FP8=1``); the bf16 route is untouched.
+Nothing here runs unless the caller asks for it (``ENABLED`` / ``FOLDJET_ENGINE_PWA_FP8=1``); the bf16 route is untouched.
 
 Route (MiniWorld MSA widths: d_msa 64, 8 heads x 32, any d_pair ``pwa_train`` serves; inference, one sample)::
 
@@ -37,6 +37,7 @@ from pathlib import Path
 
 import torch
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
 from foldjet_engine.fp8 import env as _fp8_env
 from foldjet_engine.kernels.trimul_inproj.cuda import _h100_fp8 as _F
 
@@ -44,7 +45,7 @@ E4M3_MAX = _F.E4M3_MAX
 W_SCALE = 2.0**-8  # dequant factor of w (w stored as w * 256)
 
 #: opt-in switch (environment read at import, or set the attribute)
-ENABLED = _fp8_env("MINIWORLD_PWA_FP8") == "1"
+ENABLED = _fp8_env("FOLDJET_ENGINE_PWA_FP8") == "1"
 #: Route call counters (``foldjet_engine.fp8.route_stats()``; plain ints at Python call time, never inside a kernel or graph replay):
 #: ``calls`` = :func:`forward` (the 8 x 32 native width), ``wide_calls`` = :func:`forward_wide`, ``retries`` = eager saturation redos,
 #: ``declined`` = calls the route is on for but whose shape gate (:func:`serves` / :func:`serves_wide`) sent to the bf16 route.
@@ -52,14 +53,14 @@ STATS = {"calls": 0, "wide_calls": 0, "retries": 0, "declined": 0}
 #: "sync" (default): a saturating call raises the scale (x RESCALE) and redoes itself (one host sync per call); "lazy": no host sync
 #: (required with CUDA graphs) -- the caller runs ``take_overflow()`` / ``rescale_all()`` / redo once per forward, outside the graph.
 #: A call inside a CUDA-graph capture always takes the lazy form (no host sync can be captured), as the OPM / TriMul / Transition FP8 routes
-GUARD = os.environ.get("MINIWORLD_PWA_FP8_GUARD", "sync")
-HEADROOM = float(os.environ.get("MINIWORLD_PWA_FP8_HEADROOM", "16"))
+GUARD = os.environ.get("FOLDJET_ENGINE_PWA_FP8_GUARD", "sync")
+HEADROOM = float(os.environ.get("FOLDJET_ENGINE_PWA_FP8_HEADROOM", "16"))
 #: shortest N served (below it the bf16 route runs; measured on 2.5.12: N256 +8 %, N384 -5 % at S1024); 0 = no gate
-MIN_N = int(os.environ.get("MINIWORLD_PWA_FP8_MIN_N", "384"))
+MIN_N = int(os.environ.get("FOLDJET_ENGINE_PWA_FP8_MIN_N", "384"))
 #: smallest MSA depth served below N 512 (N384: S256 +8 %, S512 0 %, S1024 -5 %; from N512 every depth measured gains); 0 = no gate
-MIN_S = int(os.environ.get("MINIWORLD_PWA_FP8_MIN_S", "1024"))
+MIN_S = int(os.environ.get("FOLDJET_ENGINE_PWA_FP8_MIN_S", "1024"))
 #: cuBLASLt fast accumulation (no fp32 promotion of the e4m3 accumulator): module 1-3 % faster at N >= 768
-FAST_ACCUM = os.environ.get("MINIWORLD_PWA_FP8_FASTACC") == "1"
+FAST_ACCUM = os.environ.get("FOLDJET_ENGINE_PWA_FP8_FASTACC") == "1"
 RESCALE = 4.0
 LNVT8_CFG = (2, 4)  # ln_vt8 (blocks per SM, TMA stages): measured best of {2, 3} x {2, 3, 4}
 
@@ -264,16 +265,16 @@ WIDE = ((64, 8), (128, 8), (128, 16), (256, 32))
 #: BIG build: ``ln_vt8`` also stores y (the bytes of ``ln_vg_w``'s y) and ``gate_w`` reads it, like the default route's ``BIG_INFER_Y``; needs
 #: N % 64 == 0, other lengths (N a multiple of 16) take the LayerNorm-again ``gate_w`` mode.  Module FP8 / default at S1024: with y 0.88 (N384) /
 #: 0.87 (N768), LayerNorm-again 0.98 / 0.97 (N400, a length without y: 1.03).  "0": always the LayerNorm-again mode
-BIG_Y = os.environ.get("MINIWORLD_PWA_FP8_BIG_Y", "1") != "0"
+BIG_Y = os.environ.get("FOLDJET_ENGINE_PWA_FP8_BIG_Y", "1") != "0"
 #: the BIG build is served from N % BIG_N_MULT == 0 (64: the y-keeping route; 16 admits the other multiples of 16, which lose at N400)
-BIG_N_MULT = int(os.environ.get("MINIWORLD_PWA_FP8_BIG_N_MULT", "64"))
+BIG_N_MULT = int(os.environ.get("FOLDJET_ENGINE_PWA_FP8_BIG_N_MULT", "64"))
 #: smallest S * N served on the BIG build (every measured shape from S64 N256 = 2^14 gains: 0.95-0.97, larger 0.83-0.91); 0 = no gate
-BIG_MIN_SN = int(os.environ.get("MINIWORLD_PWA_FP8_BIG_MIN_SN", str(1 << 14)))
+BIG_MIN_SN = int(os.environ.get("FOLDJET_ENGINE_PWA_FP8_BIG_MIN_SN", str(1 << 14)))
 #: shortest N served on the wide widths (AF3 64 x 8, module FP8 / default: N128 1.04 and N192 1.01 at S1024; N256 0.97); 0 = no gate
-WIDE_MIN_N = int(os.environ.get("MINIWORLD_PWA_FP8_WIDE_MIN_N", "256"))
+WIDE_MIN_N = int(os.environ.get("FOLDJET_ENGINE_PWA_FP8_WIDE_MIN_N", "256"))
 #: smallest S * N served on the wide widths (S512 N256 1.03, S256 N384 1.01, S128 N768 1.02; S1024 N256, S512 N384, S256 N768 0.96-0.97);
 #: 0 = no gate
-WIDE_MIN_SN = int(os.environ.get("MINIWORLD_PWA_FP8_WIDE_MIN_SN", str(3 << 16)))
+WIDE_MIN_SN = int(os.environ.get("FOLDJET_ENGINE_PWA_FP8_WIDE_MIN_SN", str(3 << 16)))
 
 
 def wide_cfg(d_msa: int, c: int) -> tuple[int, int]:

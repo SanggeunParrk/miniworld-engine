@@ -1,8 +1,8 @@
 import sys
 p = sys.argv[1] + "/src/foldjet_engine/kernels/integrations/bidir_triattn_h100.py"; s = open(p).read()
 s = s.replace("(B200_SIDE & 2) and B == 1 and L <= B200_SIDE_MAX_L and dW is None and _b200():", "(B200_SIDE & 2) and B == 1 and dW is None and _b200():")
-s = s.replace('B200_SIDE_MAX_L = int(os.environ.get("MINIWORLD_BIDIR_B200_SIDE_MAX_L", "256"))   # longer pairs: the chain\'s kernels fill the SMs, the branches only slow it',
-              'B200_SIDE_MAX_L = int(os.environ.get("MINIWORLD_BIDIR_B200_SIDE_MAX_L", "256"))   # the dWo branch only up to this length (beyond it the core GEMMs fill the SMs: it slows the chain); the dW branch at every length')
+s = s.replace('B200_SIDE_MAX_L = int(os.environ.get("FOLDJET_ENGINE_BIDIR_B200_SIDE_MAX_L", "256"))   # longer pairs: the chain\'s kernels fill the SMs, the branches only slow it',
+              'B200_SIDE_MAX_L = int(os.environ.get("FOLDJET_ENGINE_BIDIR_B200_SIDE_MAX_L", "256"))   # the dWo branch only up to this length (beyond it the core GEMMs fill the SMs: it slows the chain); the dW branch at every length')
 # the bidirectional backward: same two branches
 i0 = s.index("def _backward(dy, pair, lnw, w, wo, saved, H, Dh):")
 i1 = s.index("def _weights(wv, wb, wg, wo):")

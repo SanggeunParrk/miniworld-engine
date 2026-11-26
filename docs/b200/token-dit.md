@@ -92,7 +92,7 @@ Start: the B200 ladder of 2026-11-17 (`$W/b2511/ladder/ladder.txt`, triton pretu
 | bias-only bf16 training at cond 768 / pair 256 (rows 105-107 master): the per-step backward launches (the fused sm_100 backward is built for cond 384 / pair 128) | served: 1.40-1.64x triton, YELLOW / GREEN (refused before) |
 | token DiT training, RoseTTAFold3 (row 264): the flat q / k LayerNorm makes its q / k copies on B200 (they were raw column views of qkvg: no LayerNorm at all) and leaves q unscaled for the B200 cores | 12 RED -> 12 YELLOW (err / tol master 1.2-1.5, float32 2.6-3.8; H100 cuda tokens 1.05-1.8 / 2.3-3.7); 1.52-2.71x triton |
 | token DiT training, Chai-1 fp32 (rows 265 / 266): the fp32 cond is the identity AdaLN's raw copy | served: 1.36-2.38x triton, GREEN / YELLOW |
-| token DiT inference, FoldForge R18 `token_folds*` (rows 163 / 187, B = 5 trunk_seeds): one B = 1 step per fold on the sm_100a runner, the runner's pair-bias cache multi-entry (64 MB) | served: 1.15x (L 128) / 1.85-1.89x (L 256) triton, GREEN |
+| token DiT inference, FoldJet R18 `token_folds*` (rows 163 / 187, B = 5 trunk_seeds): one B = 1 step per fold on the sm_100a runner, the runner's pair-bias cache multi-entry (64 MB) | served: 1.15x (L 128) / 1.85-1.89x (L 256) triton, GREEN |
 | AttentionPairBias fp32 inference: the TF32 core built `-DKPERM=1` (reads the pair pass's key-permuted bias, k / v in natural order: no gathers), the row-wise stages (LN rows, q / k / g and v^T GEMMs, to_out) batched over B, the inference packs in one launch (`bo_pack_sm100.cu` modes 3 / 4, bit for bit) | 0.086 -> ~0.06 ms at r41 L256 (anthropic 0.090); L 128 served (1.12-1.76x triton, was refused); 1.16-3.8x triton overall, ahead of anthropic at every fp32 length measured (r41 L256 0.061 vs 0.090, L384 0.115 vs 0.141) |
 | tuning: `_launch_config.untracked` -- the tuner's resets / restores no longer bump autograd version counters | the B200 pretune of bias-only triton training (rows 104-106) no longer raises "modified by an inplace operation" (cherry-picked as 11c7c72c5) |
 
@@ -119,7 +119,7 @@ Inference (`conditioned_transition.cuda.token_inference`, `kernels/integrations/
 | every block at L a multiple of 128 runs `token_inference` with the B200 cores -- the default options too (they ran the composed runner: its own row passes, two conditioning GEMMs) | the H100 composition: the folded conditioning (one GEMM), PDL row passes |
 | bf16 default options: the weight pack in ONE launch (`bias_only_dit/cuda/bo_pack_sm100.cu` through `_b200_pack`) + one GEMV; it replaced `token_pack_vector`, the [Wa; Wb] cast / cat and the fold operands (~9 kernels a replay) | r144 master L128: pack ~35 -> 17 us |
 | one sample, bf16: `attn_inf -DQPAIR=1` (a work item pairs two 128-query tiles of a head; the sample-pair schedule computed a dropped partner) | r144 master L768: core 34 -> 14.5 us, step 320 -> 125 us |
-| FoldForge R18 folds (B trunk_seeds), L a multiple of 128: ONE `token_inference` call (GEMMs and row passes over every fold's rows, one core launch per fold with its bias planes) instead of one step per fold | r163 L128 414 -> 176 us, L256 545 -> 262 us |
+| FoldJet R18 folds (B trunk_seeds), L a multiple of 128: ONE `token_inference` call (GEMMs and row passes over every fold's rows, one core launch per fold with its bias planes) instead of one step per fold | r163 L128 414 -> 176 us, L256 545 -> 262 us |
 | fp32: the pair bias in one pass instead of LN rows + GEMM + mask fill -- from L 256 AttentionPairBias's TMA-fed TF32 pass `pair_bias32_tc` (natural key order; merged from `b200r3-apb`: 86 against 131 us at L 768, 286 against 485 at L 1536), below it the training rows' `pair_bias`; masked keys -1e30, as every inference bias. The fp32 training forward takes the same pass with the row stats | r99 fp32 L2048 2131 -> 1262 us |
 | bf16 wide pair (256 / 512 at 16 heads): `apb.pair_bias` (one bulk-loaded pass) instead of LN rows + GEMM + mask fill | r100 master L768 391 -> 234 us, L2048 1709 -> 868 us; Chai-1 master L2048 1680 -> 836 us |
 | model options (Boltz-2 / RoseTTAFold3 / Chai-1), bf16: the folded conditioning's operands made once with the static weight pack (a replay re-ran a cat, a row sum and two casts) | r108 master L128 86 -> 65 us |
@@ -227,7 +227,7 @@ order: `sm100.backward_tf32(det=True)`). With `unfold_lnw` above: **every traini
 four runs: rows 101, 103, 144, 260, 263, 264, 265 at L 128 / 256 / 384 / 768, both dtypes: 56 of 56; inference rows 99, 103, 108, 110, 144,
 163 at L 128 / 384: 21 of 21; before: 18 of 24 training cases differed).
 
-**Side streams in captured steps** (`bias_only_dit.cuda.side`, `MINIWORLD_TOKEN_B200_STREAMS=0` turns them off): training forward -- the
+**Side streams in captured steps** (`bias_only_dit.cuda.side`, `FOLDJET_ENGINE_TOKEN_B200_STREAMS=0` turns them off): training forward -- the
 gate GEMM and the pair -> bias pass beside the conditioning / AdaLN / q k v chain, joined before the core; training backward -- the six
 weight-gradient GEMMs and the pair backward (bf16 pair 128: AttentionPairBias's one-pass `pair_bias_bwd`, 46 against 80 us at L 512)
 beside the chain, joined before the final gradients; fp32 inference -- the pair pass and the v^T GEMM beside the chain. Captured == eager
@@ -356,7 +356,7 @@ to origin/main's (513 / 72 / 64 artifacts), `--arch sm100` 484 entries with the 
 
 ### Round 3, part 4 (2026-11-17, evening): Chai-1 fp32 gate columns -- `cuda:b200_sm100` 6 (TokenDiTChai1 only)
 
-Records `$W/b2511/agents/r3-token-dit/_r3/out/` (`cg*.{1,2}.jsonl`: 1 = new, 2 = `MINIWORLD_TOKEN_B200_NOGATE_GEMM=0`; each length group
+Records `$W/b2511/agents/r3-token-dit/_r3/out/` (`cg*.{1,2}.jsonl`: 1 = new, 2 = `FOLDJET_ENGINE_TOKEN_B200_NOGATE_GEMM=0`; each length group
 its own run; `miss6.jsonl` / `miss6.txt`: the part-3 misses re-measured alone, one length group per run).
 
 | change | effect (B200) |
@@ -506,7 +506,7 @@ q | k | g GEMM, then v^T 6.7 + rna 2.3) about 12 us after the main chain's q / k
 moving v^T beside the pair pass did not move the step (rows above): the two branches share the SMs, so the step is bound by the
 total work of the fork, not by one branch.
 
-Split (work tree, `MINIWORLD_TOKEN_B200_DQB_SIDE=0` against on, A B A B): r101 / r143 / r286 S 8 / r286 S 48 at L 128 196.8 / 176.3 /
+Split (work tree, `FOLDJET_ENGINE_TOKEN_B200_DQB_SIDE=0` against on, A B A B): r101 / r143 / r286 S 8 / r286 S 48 at L 128 196.8 / 176.3 /
 249.7 / 675.8 -> 191.6 / 170.4 / 241.7 / 642.4 (the side dqb); the rest of the base -> work difference (~2 us at one sample) is the
 dropped transpose.
 
@@ -619,9 +619,9 @@ In the step (A/B min over 2-4 interleaved rounds, the measurer's ~2 us timer gri
 -2 us at Boltz-2 r108 / Protenix r102 / r182 (a conditioning per sample) but +2-4 us where the pair pass runs beside it with a shared
 conditioning (r183) and on Chai-1 (no gating query: 77.9 / 77.5 -> 80.8 / 79.7) -- the 2-CTA clusters wait for SM pairs the side
 stream's persistent pair pass holds; the out projection on the pair kernel moved cases +-2-4 us both ways (left on cuBLAS, bit 2 of
-`MINIWORLD_TOKEN_B200_PAIR32`); the expand + SwiGLU (after the join, nothing beside it) helps every Boltz-2 row.
+`FOLDJET_ENGINE_TOKEN_B200_PAIR32`); the expand + SwiGLU (after the join, nothing beside it) helps every Boltz-2 row.
 
-Taken (`token_inference`, B200 fp32, several samples, L <= 128 (the VMN path), d 768, M a multiple of 128; `MINIWORLD_TOKEN_B200_PAIR32`
+Taken (`token_inference`, B200 fp32, several samples, L <= 128 (the VMN path), d 768, M a multiple of 128; `FOLDJET_ENGINE_TOKEN_B200_PAIR32`
 bits, default 5):
 
 | piece | effect (us, A/B min, cuBLAS path -> pair path) |
@@ -761,7 +761,7 @@ What changed (all inside `cap == (10, 0)` code and `apb_rows_sm100.cu`, which on
 |---|---|
 | bf16 / master: fp32 master weights go straight into one pack launch at any pair width (`prep_dp`: W q / k / v / g, Wo, Wf, Wb, the gate constant); no cast launches | master eval 16 x 128 L 128 42.8 -> ~27 us |
 | the pack and LayerNorm(single) of the first row in one launch (`prep_ln`) | -2 us per step (one launch) |
-| the pack / pair pass, and in the backward the independent stages, on side streams (`MINIWORLD_APB_B200_STREAMS`, default on) | graph timing, on / off: master eval L 128 24.5 / 26.5 us, master train 16 x 512 L 128 91.9 / 100.3 us, L 512 307 / 326 us |
+| the pack / pair pass, and in the backward the independent stages, on side streams (`FOLDJET_ENGINE_APB_B200_STREAMS`, default on) | graph timing, on / off: master eval L 128 24.5 / 26.5 us, master train 16 x 512 L 128 91.9 / 100.3 us, L 512 307 / 326 us |
 | a wide pair's backward (d_pair 256 / 384 / 512) in ONE launch (`pair_bias_bwd_wide1`: block b takes chunk b % NC; was one launch per 128 columns, each paying ~12 us of per-block Wf setup) | master train 16 x 512: L 128 128 -> 100 us, L 512 354 -> 313 us; same dpair bits |
 | fp32: the pair pass on the TF32 tensor cores (`pair_bias32_tc`: TMA 32-column boxes, 3 stages, `mma.sync m16n8k8` tf32, row statistics about a pivot, slices added in a fixed order): training always (natural key order + row stats: the gather and its copy go), inference at L >= 256 where it is faster (`_tc32`) | alone at L 512: 16 x 128 86 -> 47 us, 16 x 512 244 -> 135 us, 24 x 128 148 -> 51 us (3.1-4.1 TB/s); fp32 eval 16 x 512 L 512 287 -> 176 us |
 | fp32 training glue in single launches: `pack2_rna` (q / k / v rounded to TF32 + the zero second sample), `gate32`, `gate32_bwd` (dO rounded, D, dg, the zeros), the packs (`bo_pack_sm100`), dq / dk / dv written into their column blocks | (77 launches per step before, L 128) fp32 train 16 x 512 L 128 270 -> 160 us, L 512 970 -> 670 us |
@@ -797,7 +797,7 @@ Same target and measurement; records `$W/b2511/agents/r3-apb/_apb/out/spd_Fe.jso
 |---|---|
 | `planes_fix` (apb_rows_sm100.cu): `extra_pair_bias` and the L % 128 pad in ONE launch on the bias planes. fp32 added the extra planes through a sort (the key permutation, re-made inside every capture), a gather and four elementwise launches; a padded call (L 2976 -> 3072) copied the whole pair into a padded one. Now the pair pass runs at L (L % 32 == 0) and the launch writes the padded planes (pad keys `NEG`, pad query rows 0), adding the extra planes in the planes' units and key order | row 46 (8 x 384, extra bias) fp32 eval: L 256 122.7 -> 72.2 us, L 768 344 -> 275 us, L 2976 14.86 -> 3.49 ms (ratio 0.696 -> 0.163); master L 2976 11.02 -> 1.66 ms (0.817 -> 0.123) |
 | fp32 inference on three streams: the packs + the pair pass, LN + the q / k / g GEMM, the v^T GEMM (was one stream; B = 1) | fp32 eval L 128-384: -4 us (8 x 384 L 128 49.6 -> 45.5 us, 12 x 128 L 128 45.4 -> 41.4 us) |
-| the key-split bf16 inference core from L 512 (`sm100/attn_inf_ks.cu` = the branch's `attn_inf.cu`, built `-DKSPLIT=1`, + `ksplit_combine`; `sm100.apb_ksplit`, `MINIWORLD_APB_B200_KSPLIT` forces) | master eval step, unsplit -> split: 16 x 128 L 512 48.9 -> 44.8 us, L 768 67.7 -> 65.4, L 1024 96.1 -> 92.1; 12 x 128 L 768 69.4 -> 63.3; slower below L 512 (the combine launch: L 256 32.6 -> 34.6), 24 heads level |
+| the key-split bf16 inference core from L 512 (`sm100/attn_inf_ks.cu` = the branch's `attn_inf.cu`, built `-DKSPLIT=1`, + `ksplit_combine`; `sm100.apb_ksplit`, `FOLDJET_ENGINE_APB_B200_KSPLIT` forces) | master eval step, unsplit -> split: 16 x 128 L 512 48.9 -> 44.8 us, L 768 67.7 -> 65.4, L 1024 96.1 -> 92.1; 12 x 128 L 768 69.4 -> 63.3; slower below L 512 (the combine launch: L 256 32.6 -> 34.6), 24 heads level |
 | the pair backward leaves 8 SMs free (`sm_reserve`: the extension's SM count minus 8 while the partial rows are sized and the pass is launched; d_pair 128, a wide pair up to L 256). It filled every SM for half the backward, so `qkv_bwd` / dW / dxa / `ln_bwd` on the main stream sat queued until it ended | master train 12 x 128 L 256 / 512 / 768: 92.1 / 141.1 / 212.9 -> 86.0 / 134.8 / 209.0 us; a wide pair from L 512 loses (204.8 -> 207.2 us): off there |
 | fp32 training dQ bitwise repeatable: `attn_dqb_tf32 -DDQPART=1 -DDET=1` (ported from the branch; a slice per 64-key chunk, `torch.sum` in chunk order; `sm100.backward_tf32(dq_parts=True)`, default off: the token DiT's build is unchanged) | `det2.py`: fp32 train L 128-768 x 3 runs bitwise equal (was ~2e-5 relative on dQ from L 384); fp32 train worst ratio 0.607 -> 0.629 |
 
@@ -1219,7 +1219,7 @@ Taken:
   L 128 26.6 -> 24.6 us. Accuracy GREEN (18 / 18 master eval cases L 128 / 256), deterministic.
 
 Built, measured, rejected:
-- (b) the fully fused small-L inference (core + to_out in one launch, `MINIWORLD_APB_B200_SMALL=2`, kept opt-in): a cluster of the NH heads
+- (b) the fully fused small-L inference (core + to_out in one launch, `FOLDJET_ENGINE_APB_B200_SMALL=2`, kept opt-in): a cluster of the NH heads
   of a 64-query block exchanges the gated o for to_out. Per-CTA stamps (globaltimer) at L 128, after griddepcontrol.wait: loads 2.6 us,
   core 1.0-1.3, exchange 3.3 (bulk shared::cta -> shared::cluster pushes) / 4.6 (st.shared::cluster v4) / 3.0 (global + counter), to_out
   1.0: every form 0-4 us slower than attn_inf + cuBLAS (each CTA must receive the block's whole o, 64 KB). At d_pair 128 L 128 the core-only
@@ -1354,7 +1354,7 @@ Taken (`small_core`, apb_rows_sm100.cu; `apb_rows.cu` untouched):
   30.7 -> 29.0 (24 heads +0.7: 64 stays).
 - training forward at L 128 (d_pair 128) in one launch (`small_core_train`, the fused form with attn_fwd2's scaling, writing O fp32, LSE
   and og for the backward; replaces attn_fwd2 -> gate_rows -> cuBLAS to_out): master train r146 53.6 -> 51.3, r148 60.4 -> 57.4, r222 58.6 ->
-  54.2, r147 60.3 -> 59.4 us; every gradient within 6e-3 (relative to its max) of the attn_fwd2 path. At L 256 (`MINIWORLD_APB_B200_TRF256=1`):
+  54.2, r147 60.3 -> 59.4 us; every gradient within 6e-3 (relative to its max) of the attn_fwd2 path. At L 256 (`FOLDJET_ENGINE_APB_B200_TRF256=1`):
   r146 -2.1, the others +0.7 to +3.9 (not routed).
 
 Measured and rejected: (3) attn_inf `-DPDLW=2` (the tensor maps prefetched before griddepcontrol.wait, launch_dependents right after it, so
@@ -1522,7 +1522,7 @@ backward. Master eval (r148 / r41 L 256 front, r147 24 heads, r41 / r146 L 384):
 show first-touch latency (two dependent round trips), not the transfer, and the pair backward's measurements above found no gain from finer
 stages.
 
-## 2026-11-19 (agent C, n13-fp8-c): opt-in e4m3 expand on B200 (`MINIWORLD_TOKEN_DIT_FP8=expand`, default OFF)
+## 2026-11-19 (agent C, n13-fp8-c): opt-in e4m3 expand on B200 (`FOLDJET_ENGINE_TOKEN_DIT_FP8=expand`, default OFF)
 New files `token_dit_fp8_b200.py`, `gemm_swiglu_f8_sm100.cu`, `token_dit_fp8_bind_sm100.cu`; the default route is bit-identical (398 / 398 measurer cases, eager + graph, `docs/b200/fp8.md`).
 The bf16 chain above is unchanged; with the switch on, the AF3-family default block and Chai-1's identity block replace the expand step (row pass -> cuBLAS / sm_100a SwiGLU GEMM) by the quantising AdaLN pass + the tcgen05
 `kind::f8f6f4` expand + SwiGLU kernel (M >= 1024 rows; 96-CTA grid beside the attention core in the parallel schedule). Block time -2 .. -5 % (Protenix / MiniWorld), -5 .. -9 % (Chai-1), energy -3 .. -14 %; update error 5.4 % (bf16 route

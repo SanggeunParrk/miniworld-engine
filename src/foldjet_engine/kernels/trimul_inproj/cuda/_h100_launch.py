@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# Modified by MiniWorld Engine from Anthropic's uplifting-biomolecular-modeling@f4f62fa6, common/opt_core/opt_core/kernels/trimul/native/pkg/v5/python/trimul_native/launch.py (Apache-2.0; see licenses/THIRD_PARTY_NOTICES.md).
+# Modified by FoldJet Engine from Anthropic's uplifting-biomolecular-modeling@f4f62fa6, common/opt_core/opt_core/kernels/trimul/native/pkg/v5/python/trimul_native/launch.py (Apache-2.0; see licenses/THIRD_PARTY_NOTICES.md).
 """trimul_native.launch -- load this package's arch-keyed cubins into the framework's primary context and launch their kernels on the
 framework's current stream, with kernel arguments packed from a declared signature.
 
@@ -29,6 +29,7 @@ Conventions (the contract the kernels in csrc/ are written against):
   encoded descriptor while (address, sizes, strides, box, swizzle) repeat.
 """
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
 import ctypes
 import os
 import struct as _struct

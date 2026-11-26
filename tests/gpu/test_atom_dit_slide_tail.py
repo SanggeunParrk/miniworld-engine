@@ -3,7 +3,7 @@ reference, the slid key window ``[R_rule - 128, R_rule)`` (``functional.slide_st
 query window for ``slide_qblock``). ``cuda`` (H100 kernels/integrations/local_dit_h100, A100 kernels/dit_variants) recomputes those windows
 on the tail kernels of ``dit_variants/cuda/edge.cu`` (window count read on the device). Compared with the ``pytorch`` reference at EVERY
 position: the block output, and in training d single / d cond / d pair and every parameter gradient, with an upstream gradient on all rows
-(padding rows included: callers read the residual stream there) and masked to the real rows (FoldForge's pattern). Also the ``triton``
+(padding rows included: callers read the residual stream there) and masked to the real rows (FoldJet's pattern). Also the ``triton``
 backend (its window kernel reads the slid starts of every window)."""
 
 import typing

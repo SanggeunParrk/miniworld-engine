@@ -40,6 +40,7 @@ from typing import cast
 import torch
 import torch.nn.functional as F
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
 from foldjet_engine.kernels import _capture, _sm120
 from foldjet_engine.kernels import ieee_f32 as _ieee
 from foldjet_engine.kernels._compile import opaque
@@ -265,7 +266,7 @@ def _wkey(t: torch.Tensor):
 
 
 def _hoist_token_bias(save: bool, batch: int, mask_kind: int, heads: int, padded: int, dt: torch.dtype, pair: torch.Tensor) -> bool:
-    """Whether this inference call takes the pair bias from the per-pair hoist (``MINIWORLD_TOKEN_BIAS_HOIST=0`` switches it off, for A / B): one fold (batch 1), a key
+    """Whether this inference call takes the pair bias from the per-pair hoist (``FOLDJET_ENGINE_TOKEN_BIAS_HOIST=0`` switches it off, for A / B): one fold (batch 1), a key
     mask shared by the samples or none, no autograd, an ordinary (version-counted) pair, and a bias that fits ``TOKEN_BIAS_HOIST_MAX_BYTES``. The atom width has its own
     explicit cache (``cache_pair_bias``) and is not hoisted here."""
     return (
@@ -276,7 +277,7 @@ def _hoist_token_bias(save: bool, batch: int, mask_kind: int, heads: int, padded
         and not pair.is_inference()
         and not (torch.is_grad_enabled() and pair.requires_grad)
         and heads * padded * padded * dt.itemsize <= TOKEN_BIAS_HOIST_MAX_BYTES
-        and os.environ.get("MINIWORLD_TOKEN_BIAS_HOIST", "1") != "0"
+        and os.environ.get("FOLDJET_ENGINE_TOKEN_BIAS_HOIST", "1") != "0"
         and _devcap(pair.device) in ((8, 0), (12, 0))  # A100 and RTX 5090 (same sources, sm_120a; 5090 measured 2026-11-23: cuda:5090_sm120 bumped)
     )
 

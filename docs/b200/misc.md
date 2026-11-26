@@ -240,7 +240,7 @@ Ladder on the B200 tokens before the round (`docs/ladder.md` rule, graph timing,
 | `PairEmbedCA` inference: a B200 decoder-pair forward (`pair_embed_geom/cuda/sm100/pe_ca_sm100.cuh`, `forward_ca_b200`) replaces the RTX 5090 one-launch kernel and the H100 launch at every size; `ca_eval_slower` removed | 16 / 48 refused; served eval cases 1.0-1.5x triton | 48 / 48 served, all GREEN; eval 1.29-1.50x triton without the LayerNorm, 1.34-1.56x with it (S5 L384 63.4 / 67.5 us vs 81.8 / 100.3); train unchanged 1.07-1.85x |
 | `ParallelResidual`: `parallel_residual_sm100.cu` = the shared source with the inputs of tensors past the L2 (>= 160 MB) read through the default cache path instead of evict-first loads | cuda / triton up to 1.040 (8 cases > 1.02) | max 1.012 (0 cases > 1.02); L2048 x 3 branches 1547 -> 1486 us (7.2 TB/s, triton 1489) |
 | `SmoothLddtLoss`: `slddt_prep4` (four threads a row; B200-only translation unit `smooth_lddt_sm100.cu`, which includes the shared `smooth_lddt.cu`) for prep grids of <= 4 CTAs per SM | master L1024 eval 59.8 vs triton 57.2 us | 53.1 vs 57.2 (triton / cuda 1.14-9.96 over 64 cases); prep outputs bitwise equal |
-| ProteinMPNN: the sm100 prebuild target yields the four MPNN sm_100a builds (`kernels/integrations/__init__.py`; `_prebuild.py` sets `MINIWORLD_ENGINE_BUILD_ARCH=sm100` for the sm100 target, as it does sm120) | JIT build on first use | `mpnn_{message,node_message,edge,relpos}_sm80_sm100` in the sm100 plan |
+| ProteinMPNN: the sm100 prebuild target yields the four MPNN sm_100a builds (`kernels/integrations/__init__.py`; `_prebuild.py` sets `FOLDJET_ENGINE_BUILD_ARCH=sm100` for the sm100 target, as it does sm120) | JIT build on first use | `mpnn_{message,node_message,edge,relpos}_sm80_sm100` in the sm100 plan |
 
 **The decoder-pair forward.** The op writes B n^2 x 256 bf16 (S5 L384: 377 MB). The RTX 5090 kernel (non-persistent CTAs of 32 pairs, each
 half-warp binning its pair from three dependent global loads before its first store) reached ~3 TB/s on the B200, and with the LayerNorm it
@@ -393,7 +393,7 @@ No requirement row of these classes is outside the kernels' contracts, and since
 
 No shared `.cu` / `.cuh` source changed (2026-11-16 and 2026-11-17): `smooth_lddt.cu` and `parallel_residual.cu` are byte-identical to the
 base; the B200 builds include them from B200-only translation units (`smooth_lddt_sm100.cu` adds `slddt_prep4`, `parallel_residual_sm100.cu`
-switches the input loads), so the H100 / A100 / RTX 5090 cubins and extensions keep their keys; `kernels/_prebuild.py` sets `MINIWORLD_ENGINE_BUILD_ARCH=sm100` for the sm100
+switches the input loads), so the H100 / A100 / RTX 5090 cubins and extensions keep their keys; `kernels/_prebuild.py` sets `FOLDJET_ENGINE_BUILD_ARCH=sm100` for the sm100
 target (on a B200 build host the same artifacts as before; elsewhere the sm_80 builders now target sm_100a as they should);
 `kernels/integrations/__init__.py` sm100 branch yields `_prebuild_mpnn()`. Python-side, outside sm100-only files (2026-11-16):
 

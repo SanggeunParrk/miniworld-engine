@@ -524,7 +524,7 @@ def inputs(case: Case, module: BackendModule, *, device) -> dict:
 
 
 def keeps_expanded(case: Case) -> bool:
-    """Whether the measurers keep the case's stride-0 expanded inputs expanded (a ``*_shared_cond`` stream: FoldForge's conditioning
+    """Whether the measurers keep the case's stride-0 expanded inputs expanded (a ``*_shared_cond`` stream: FoldJet's conditioning
     shared across the samples, which the backends serve on dedicated shared paths). Every other case's inputs are copied as before."""
     from foldjet_engine.modules.primitives import shared_cond_stream
 

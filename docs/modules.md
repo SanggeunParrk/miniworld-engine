@@ -39,7 +39,7 @@ class Transition(BackendModule, MasterWeights):
 | `pytorch` | the reference: the single source of truth of the op's math | it is the reference |
 | `cuda` | the engine's hand-written kernels for the card of the input tensor: H100 (sm_90a) or A100 (sm_80), through `kernels/<family>/cuda` and `kernels/integrations`; any other card is refused by `_supports_cuda` | yes |
 | `triton` | the engine's Triton kernels (no TMA, any CUDA card), launch configs from `kernels/<family>/configs/<card>.json` | yes |
-| `anthropic` | Anthropic's uplifting-biomolecular-modeling release in `third_party/anthropic/upstream`, loaded by `modules/_anthropic.py` (revision and file checksums checked against `third_party/anthropic/UPSTREAM.json`; the release itself is not in git; `MINIWORLD_ANTHROPIC_ROOT` overrides the root) | no: informational |
+| `anthropic` | Anthropic's uplifting-biomolecular-modeling release in `third_party/anthropic/upstream`, loaded by `modules/_anthropic.py` (revision and file checksums checked against `third_party/anthropic/UPSTREAM.json`; the release itself is not in git; `FOLDJET_ENGINE_ANTHROPIC_ROOT` overrides the root) | no: informational |
 | `cueq` | NVIDIA cuEquivariance 0.12 (`cuequivariance_torch`), loaded by `modules/_cueq.py`; `_supports_cueq` refuses exactly the calls the library would run in its own PyTorch formula | no: informational |
 | `engine-fp8` (opt-in, 3.0.0) | the `cuda` backend with the FP8 (e4m3) `safe` routes on for this module's inference calls (H100); public name `engine-fp8`, identifier `engine_fp8`; not in any `backends` tuple: `set_backend("engine-fp8")` resolves to `cuda` and sets `engine_fp8 = True` ([fp8.md](fp8.md)). Training calls (train mode / autograd on) run the default bf16 path | no: outside the judge (no rows, never measured) |
 
@@ -59,7 +59,7 @@ Some ops have one class per model; a selector builds the model's own class (not 
 | selector | map | example |
 |---|---|---|
 | `TokenDiT(model, ...)` | `TOKEN_DIT_MODELS` in `token_dit.py` | `af3`, `protenix`, `openfold3`, `esmfold2`, ... -> `TokenDiTProtenix`; `boltz2`, `rosettafold3`, `chai1`, `miniworld`, `miniworld_bias_only` -> their classes |
-| `AtomDiT(model, ...)` | `ATOM_DIT_MODELS` in `atom_dit.py` | `af3` / `openfold3` / `intellifold2` -> `AtomDiTOpenFold3`; `protenix` / `opendde` -> `AtomDiTProtenix`; `esmfold2` (released pair-free SWA block), `esmfold2_pair` -> `AtomDiTESMFold2Pair` (FoldForge's ESMFold2 atom stack with the atom pair), `miniworld`, `boltz2`, `rosettafold3`, `chai1` |
+| `AtomDiT(model, ...)` | `ATOM_DIT_MODELS` in `atom_dit.py` | `af3` / `openfold3` / `intellifold2` -> `AtomDiTOpenFold3`; `protenix` / `opendde` -> `AtomDiTProtenix`; `esmfold2` (released pair-free SWA block), `esmfold2_pair` -> `AtomDiTESMFold2Pair` (FoldJet's ESMFold2 atom stack with the atom pair), `miniworld`, `boltz2`, `rosettafold3`, `chai1` |
 | `TriangleAttention(..., model=)` | `triangle.py` | `chai1` -> `TriangleAttentionChai1`; `af3` -> `TriangleAttentionAF3`; `rf3`; `chai1_confidence` |
 | `TriangleMultiplication(..., model=)` | `triangle.py` | `rf3` -> `TriangleMultiplicationRF3` |
 
@@ -91,7 +91,7 @@ out `[A][B]` and the grouped-bias attention reads sample `s`'s bias from pair `s
 Served on: `pytorch` and `triton` everywhere; `cuda` for bfloat16 (or master) inference: on H100 in one call over the B folds (the grouped-bias
 kernels; the token block within its inference gate, e.g. L a multiple of 128; the atom block: every key window), on A100 the token block
 within its sm_80 gate and the atom block as one sm_80 call per fold (the sm_80 atom kernels take one pair; N a multiple of 64). A B > 1
-call in fp32 or with a gradient is refused with a reason on both cards (the TF32 kernels and the backward keep one pair bias). FoldForge
+call in fp32 or with a gradient is refused with a reason on both cards (the TF32 kernels and the backward keep one pair bias). FoldJet
 measured its grouped 5 x 5 sampler at 1.5x end to end for assemblies up to 256 tokens.
 
 ## DiT stacks and the shared pair norm (`modules/dit_stack.py`)
@@ -135,9 +135,9 @@ pair updates (two triangle multiplications, two triangle attentions, the transit
 4); the single track's two updates go through the same call. The reference statements (a bf16 subtraction per update, the sum's additions
 and the final addition: 10 full-pair elementwise passes per block, 19-22 % of the Chai-1 forward at 512 to 2048 tokens) stay the
 `"pytorch"` path and the fallback outside the kernel's range (a dtype or device mismatch between the block input and an update's output).
-The five outputs are live together (two more pair-sized tensors than the statement sequence's peak; the FoldForge Chai-1 forward's peak
+The five outputs are live together (two more pair-sized tensors than the statement sequence's peak; the FoldJet Chai-1 forward's peak
 memory is unchanged at 512 / 1024 / 2048 tokens: 14.6 / 21.0 / 50.9 GB). The fused sum runs when the updates run on `cuda`: the block set
-to `"cuda"`, or a caller that picks the backend per sub-module (FoldForge) with the block itself left on `"pytorch"`. Measured on the H100
+to `"cuda"`, or a caller that picks the backend per sub-module (FoldJet) with the block itself left on `"pytorch"`. Measured on the H100
 (CUDA graph, bf16, Chai-1 trunk block with the single track, same process, interleaved; ms, 3.0.0 statements -> fused):
 
 | L | 128 | 256 | 384 | 512 | 768 | 1024 | 1536 | 2048 |
@@ -145,18 +145,18 @@ to `"cuda"`, or a caller that picks the backend per sub-module (FoldForge) with 
 | 3.0.0 | 0.454 | 1.453 | 3.044 | 5.323 | 12.18 | 22.23 | 59.23 | 111.6 |
 | fused | 0.392 | 1.179 | 2.469 | 4.431 | 10.46 | 18.50 | 49.31 | 96.28 |
 
-FoldForge Chai-1 5I28 x n warm forward (compile + CUDA graph, scope trunk, seeds 0, 200 steps, 5 samples; median of the warm forwards,
+FoldJet Chai-1 5I28 x n warm forward (compile + CUDA graph, scope trunk, seeds 0, 200 steps, 5 samples; median of the warm forwards,
 two interleaved rounds): 512 tokens 1.919 -> 1.705 s (-11 %), 1024 tokens 6.97 / 7.06 -> 6.21 / 6.28 s (-11 %), 2048 tokens 32.64 / 32.60 ->
 29.34 / 29.35 s (-10 %). At 1024 tokens the trunk's bf16 `add` kernels went from 3788 calls / 1376 ms to 780 calls / 337 ms plus 224 fused
 calls / 246 ms. Accuracy against the fp64 reference (rows above, lengths 128 / 256 / 512, eval and train): no light is worse than with the
 statements, and the output errors are equal or smaller (the sum is one fp32 pass, one rounding). Its rows: `PairformerBlock` `chai1`
 (trunk, eval and train) and `chai1_confidence` (eval, 1 or 5 samples) in `requirements_module.csv`.
 
-## FoldForge 5I28 sizes (1024-2048 tokens, 12-16 k atoms)
+## FoldJet 5I28 sizes (1024-2048 tokens, 12-16 k atoms)
 
-FoldForge's 5I28 benchmark folds n copies of a 128-residue chain (n = 1 .. 16) with an MSA (depth 1024 after the crop) and 4 templates,
+FoldJet's 5I28 benchmark folds n copies of a 128-residue chain (n = 1 .. 16) with an MSA (depth 1024 after the crop) and 4 templates,
 so its trunk runs at 1024 / 1536 / 2048 tokens (n = 8 / 12 / 16) and its atom stacks at about 11.7 k / 15.6 k atoms. The token / pair rows
-of every class the nine 5I28 models build carry 1024 | 1536 | 2048, their atom rows 12288 | 16384 (source "FoldForge 5I28"; the
+of every class the nine 5I28 models build carry 1024 | 1536 | 2048, their atom rows 12288 | 16384 (source "FoldJet 5I28"; the
 `MSAPairWeightedAveraging` rows are extended on their own branch). Every `cuda` / `triton` backend serves them at inference on both cards
 (probed at the rows' eval samples and at 4 samples for the 64-wide template stack). Notes:
 
@@ -190,9 +190,9 @@ plain class attribute `dead = False`: a flagged instance returns its residual in
 engine does NOT ship the function that sets it (2.4.x `architecture.checkpoints.dead_modules.mark_dead_modules` /
 `clear_dead_modules`, removed with `architecture/` in 2.5.0) and will not export one: deciding that an instance is dead is a property of
 a checkpoint (its parameters fall below a threshold that the model's own kit chose, e.g. Protenix-v2's ~5e-37 weights against a 1e-30
-bound), so it belongs to the model side that loads checkpoints (FoldForge `modules/dense/dead.py`, MiniWorld's loader), next to the
+bound), so it belongs to the model side that loads checkpoints (FoldJet `modules/dense/dead.py`, MiniWorld's loader), next to the
 other checkpoint conversions. The engine's contract is only the flag: set `module.dead = True` after loading and the module returns its
-input at inference; `False` (the default) runs it. Decision 2026-11-11 (FoldForge request R15: declined, scope).
+input at inference; `False` (the default) runs it. Decision 2026-11-11 (FoldJet request R15: declined, scope).
 
 ## Public CUDA-graph capture API (`foldjet_engine.capture`)
 
@@ -206,11 +206,11 @@ from the package root; the public capture API is the module `foldjet_engine.capt
 | `clear_weight_caches(*modules)` | drop every weight / input-derived cache of the engine (all stores registered with `kernels._capture.weight_cache`, the parameter-form cache, the TF32 operand cache, the refresh records) and, for the given modules, the per-instance caches; call it before replacing weights (a second model, a test that builds many) and drop graphs captured before the clear |
 | `weights_changed(*targets)` | the fused-optimizer contract: the weight caches are keyed on `(data_ptr, _version)`, and `Adam(..., fused=True)` (any fused torch optimizer, a `.data` write, a raw kernel) updates weights without bumping `_version`, so the next eager forward would read the packs of the old weights. Call it after every such step, before the next forward: `weights_changed(optimizer)` / `(model)` / `(params)` bumps the versions (`torch.autograd.graph.increment_version`: no kernel, nothing dropped) and returns the count. `clear_weight_caches(model)` is the heavier alternative. Graphs captured under `static_weights()` / `static_inputs()` keep the weights of capture time (capture again); graphs captured outside them repack at every replay |
 | `weight_caches()` | the registered stores by name (inspection) |
-| `refresh_static_inputs(root=None, *, tables=None)` | rebuild every hoisted table a `static_inputs()` capture reads from the eager cache, from the current contents of its inputs, into the tensors the graph reads (FoldForge R26: one graph per shape, many items); returns the count; raises `StaleStaticInputs` (nothing written) when the weights changed, an input's layout changed, or the capture was not under `static_weights()` |
+| `refresh_static_inputs(root=None, *, tables=None)` | rebuild every hoisted table a `static_inputs()` capture reads from the eager cache, from the current contents of its inputs, into the tensors the graph reads (FoldJet R26: one graph per shape, many items); returns the count; raises `StaleStaticInputs` (nothing written) when the weights changed, an input's layout changed, or the capture was not under `static_weights()` |
 | `release_static_inputs(root=None, *, tables=None)` | drop the refresh records (they hold their tables and inputs): with the graph |
 | `signature(root, *inputs)` | hashable per-shape graph-cache key: `root`'s identity and the inputs' shape / strides / dtype / device |
 
-### One sampler graph per shape (FoldForge R26)
+### One sampler graph per shape (FoldJet R26)
 
 A captured sampler step bakes in the addresses of its inputs and of the tables the engine hoisted in the warm-up (read from the eager
 cache under `static_inputs()`, so a replay runs none of their kernels). To reuse the graph for another item of the same shape:
@@ -258,7 +258,7 @@ versions that backend on one card only and wins over the plain `"<backend>"` key
 
 ## Downstream requests the classes do not take (decisions)
 
-FoldForge's engine requests (its `docs/ENGINE-REQUESTS.md`) that are answered by a statement rather than a class:
+FoldJet's engine requests (its `docs/ENGINE-REQUESTS.md`) that are answered by a statement rather than a class:
 
 | request | decision |
 |---|---|

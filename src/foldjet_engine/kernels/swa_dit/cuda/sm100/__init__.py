@@ -26,6 +26,8 @@ through the CUDA driver (``augmented_attention.cuda.sm100.driver``) on torch's c
 
 from __future__ import annotations
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
+
 import functools
 import importlib.util
 import os

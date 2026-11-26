@@ -9,6 +9,8 @@ model whitelist ``fp8.TRIATTN_MODELS``), read through this module's ``__getattr_
 
 from __future__ import annotations
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
+
 import functools
 import hashlib
 import os
@@ -29,27 +31,27 @@ _DELEGATED = frozenset(
     {"FP8_PV", "FP8_PV_FUSED", "FP8_PV_UNFUSED", "FP8_PV_D64", "FP8_PV_HL", "FP8_VSCALE_AUTO", "FP8_PV_MIN_S", "FP8_PV_FRONT_MIN_S"}
 )
 #: e4m3 q / k (the H100 ``FP8_QK``, redone: ``-DTF_Q8=1`` build of the core, QK^T as one ``kind::f8f6f4`` MMA): the call-site kinds that take it, and the shortest padded S.
-#: BUILT and measured (docs/b200/fp8.md "TriAttn e4m3 q / k"); the shipped gates below say where it is served.  ``MINIWORLD_TRIATTN_B200_FP8_QK_MINS``
+#: BUILT and measured (docs/b200/fp8.md "TriAttn e4m3 q / k"); the shipped gates below say where it is served.  ``FOLDJET_ENGINE_TRIATTN_B200_FP8_QK_MINS``
 #: = ``fused=<S>,unfused=<S>,d64=<S>`` overrides (experiments); a kind that is not listed / above any S is never served.
 def _qk_mins() -> dict:
     mins = dict(QK_MINS_SHIPPED)
-    for item in filter(None, os.environ.get("MINIWORLD_TRIATTN_B200_FP8_QK_MINS", "").split(",")):
+    for item in filter(None, os.environ.get("FOLDJET_ENGINE_TRIATTN_B200_FP8_QK_MINS", "").split(",")):
         k, _, v = item.partition("=")
         mins[k.strip()] = int(v)
     return mins
 
 
 #: measured gates (docs/b200/fp8.md "TriAttn e4m3 q / k"): the front-written e4m3 rows win from S = 1024 (module x0.95-0.965 gap, x0.90-0.95 sustained against the P / V route);
-#: "unfused" is served only for the d_pair-64 fronts (4 x 32, 2 x 32) and only when the experiment variable MINIWORLD_TRIATTN_B200_FP8_QK_KINDS lists it; d64 (64-channel heads): no front, closed
+#: "unfused" is served only for the d_pair-64 fronts (4 x 32, 2 x 32) and only when the experiment variable FOLDJET_ENGINE_TRIATTN_B200_FP8_QK_KINDS lists it; d64 (64-channel heads): no front, closed
 QK_MINS_SHIPPED = {"fused": 1024, "unfused": 1024, "d64": 1 << 30}
-QK_PASS = bool(int(os.environ.get("MINIWORLD_TRIATTN_B200_FP8_QK_PASS", "0")))  # experiment: q / k by the standalone pass where the front writes bf16 (a loss)
+QK_PASS = bool(int(os.environ.get("FOLDJET_ENGINE_TRIATTN_B200_FP8_QK_PASS", "0")))  # experiment: q / k by the standalone pass where the front writes bf16 (a loss)
 QK_HEADROOM = 2.0  # q / k scale: |q| / sq, |k| sq <= 448 / QK_HEADROOM at the calibration absmax (the H100 FP8_QK_HEADROOM)
 
 #: measured gates (sequence length S of the call, padded): below them the bf16 core runs (docs/b200/fp8.md "TriAttn")
-MIN_S = int(os.environ.get("MINIWORLD_TRIATTN_B200_FP8_MINS", "1024"))  # head dim 32, every kind: gap x1.008-1.013, sustained x0.96-0.973, energy x0.95-0.971 at L1024 (docs/b200/fp8.md D.3)
-#: the 64-channel-head core (built, measured: module x1.04-1.12 at L512-2048, core + pass 1.01-1.25: NOT served): the gate is closed; MINIWORLD_TRIATTN_B200_FP8_MINS64=<S> opens it (experiments)
-MIN_S64 = int(os.environ.get("MINIWORLD_TRIATTN_B200_FP8_MINS64", str(1 << 30)))
-_QK_KINDS = frozenset(filter(None, os.environ.get("MINIWORLD_TRIATTN_B200_FP8_QK_KINDS", "").split(",")))  # kinds besides "fused" (whose switch is the H100 module's FP8_QK) that take e4m3 q / k
+MIN_S = int(os.environ.get("FOLDJET_ENGINE_TRIATTN_B200_FP8_MINS", "1024"))  # head dim 32, every kind: gap x1.008-1.013, sustained x0.96-0.973, energy x0.95-0.971 at L1024 (docs/b200/fp8.md D.3)
+#: the 64-channel-head core (built, measured: module x1.04-1.12 at L512-2048, core + pass 1.01-1.25: NOT served): the gate is closed; FOLDJET_ENGINE_TRIATTN_B200_FP8_MINS64=<S> opens it (experiments)
+MIN_S64 = int(os.environ.get("FOLDJET_ENGINE_TRIATTN_B200_FP8_MINS64", str(1 << 30)))
+_QK_KINDS = frozenset(filter(None, os.environ.get("FOLDJET_ENGINE_TRIATTN_B200_FP8_QK_KINDS", "").split(",")))  # kinds besides "fused" (whose switch is the H100 module's FP8_QK) that take e4m3 q / k
 HEADROOM = 4.0  # V scale: |v| * vinv <= 448 / HEADROOM at the calibration absmax
 
 

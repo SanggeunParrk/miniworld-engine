@@ -4,7 +4,7 @@ CUDA graphs, 128 MB L2 flush, order reversed every round, a same-cubin control g
     python trimul_ab6.py [--rounds 6] [--err] D:kind:L ...        # kind 1 outgoing, 2 incoming, 0 bidirectional
 
 Module: ``TriangleMultiplication`` / ``BidirectionalTriangleMultiplication`` (master weights, bf16 autocast, eval), weights N(0, 1 / D), 5 masked tokens.
-The route runs with every gate removed (``MINIWORLD_TRIMUL_FP8_MINL`` = 0 semantics), static scales calibrated on the eager warm-up, lazy guard.
+The route runs with every gate removed (``FOLDJET_ENGINE_TRIMUL_FP8_MINL`` = 0 semantics), static scales calibrated on the eager warm-up, lazy guard.
 Ratio = default / variant (> 1: e4m3 faster). Error: update error rms(y - y64) / rms(y64 - x) (docs/fp8.md column), and max |y - y64| / max |y64 - x|."""
 
 import argparse

@@ -12,6 +12,7 @@ launch for both directions) in the small-L cells of ``CTR_CELLS``. Output:
 Sources: ``b200_sources/{k1w,k3g,k3w,wide_aux}.cu``. Every call owns its buffers.
 """
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
 import functools
 import os
 from pathlib import Path

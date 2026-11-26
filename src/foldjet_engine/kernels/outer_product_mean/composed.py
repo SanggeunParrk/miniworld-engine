@@ -67,7 +67,7 @@ def biased_wide_serves(module, msa, mask) -> bool:
 
 
 def _biased_fp8(module, msa, mask, token_asym_id, residual):
-    """The opt-in e4m3 route (``opm_fp8``, ``MINIWORLD_OPM_FP8``) for the biased projections: its FP8 wide prologue takes the left | right biases
+    """The opt-in e4m3 route (``opm_fp8``, ``FOLDJET_ENGINE_OPM_FP8``) for the biased projections: its FP8 wide prologue takes the left | right biases
     as the bf16 one does, so RoseTTAFold3's OPM runs the same grouped e4m3 product as every other family. None: not served (the default
     composition below runs, unchanged)."""
     from foldjet_engine.kernels.integrations import opm_fp8, opm_train

@@ -8,9 +8,15 @@
 - `import miniworld_engine` (and any submodule) still works: `src/miniworld_engine` is an alias that returns the `foldjet_engine` module objects (the same objects, no second copy of any state) and emits one `FutureWarning`.
 - Build log prefix `[foldjet-engine build]`.
 
+## Environment variables and caches
+
+- Every environment variable is now `FOLDJET_ENGINE_*` (`MINIWORLD_X` and `MINIWORLD_ENGINE_X` -> `FOLDJET_ENGINE_X`). The old names are still read: `foldjet_engine._envcompat` copies each set old name to its unset new name on import, with one `FutureWarning` naming them.
+- Caches: `~/.cache/foldjet_engine_jit` and `~/.cache/foldjet_engine_headers` (`$XDG_CACHE_HOME` respected). An existing `miniworld_engine_jit` / `miniworld_engine_headers` keeps being used while the new directory does not exist, so a warm cache is not rebuilt.
+- Docs, comments, scripts: FoldForge -> FoldJet, MiniWorld Engine -> FoldJet Engine. `MiniWorld` model-family names (`TokenDiTMiniWorld`, `ImplementationType.MINIWORLD`, ...) are the MiniWorld model, not the engine, and stay.
+
 ## What did not change (on purpose)
 
-Everything that enters a prebuilt kernel's key or is compiled into a binary: every C / C++ / CUDA file, the extension and cubin names (`miniworld_*`), the `--miniworld-gencode` / `--miniworld-ptx` flag markers, `-DMINIWORLD_*`, the `MINIWORLD_*` environment variables (three of them are read by the binaries), the `torch.library` namespaces. Also the requirements tables, judge tokens and model / class names (the judge keys on them), and the JIT / header cache directory names (`miniworld_engine_jit`, `miniworld_engine_headers`) so existing caches stay valid. Historical records (release notes, measurement records) are left as written.
+Everything that enters a prebuilt kernel's key or is compiled into a binary: every C / C++ / CUDA file, the extension and cubin names (`miniworld_*`), the `--miniworld-gencode` / `--miniworld-ptx` flag markers, `-DMINIWORLD_*`, the three `MINIWORLD_*` switches the binaries read themselves (`A100_CLEANUP`, `TRIATTN_B200_PDL`, `TRIATTN_B200_L128_GB`: set the new `FOLDJET_ENGINE_*` name and it is copied to the old one), the `torch.library` namespaces. Also the requirements tables, judge tokens and model / class names (the judge keys on them), and the JIT / header cache directory names (`miniworld_engine_jit`, `miniworld_engine_headers`) so existing caches stay valid. Historical records (release notes, measurement records) are left as written.
 
 ## Proof that no kernel changed
 

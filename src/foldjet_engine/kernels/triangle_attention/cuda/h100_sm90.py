@@ -5,6 +5,7 @@ path (``b200_triattn.py``): front (LN + projections + bias) | attention core | t
 matching backward.
 """
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
 import functools
 import os
 import weakref
@@ -86,8 +87,8 @@ STATS = {"d128_calls": 0, "pv_fused": 0, "qk": 0, "pv_front": 0, "pv_pass": 0, "
 #: (the standalone ``vt_quant`` pass, static per-site scale, the same overflow flag), p as e4m3 bytes.  Call-site kind "d64" of :data:`foldjet_engine.fp8.TRIATTN_MODELS`.
 FP8_PV_D64 = False
 #: the shortest padded S the d64 FP8 core takes: below it the V^T pass costs more than the core gains (module time, CUDA graph, Chai-1 trunk node: FP8 / fp16 core 1.12 at L128,
-#: 1.04-1.06 at L256-512, 1.01 at L768, 0.986 at L1024, 0.944 at L1536, 0.930 at L2048; docs/fp8.md).  ``MINIWORLD_TRIATTN_D64_MINS=<s>`` overrides it (0 = no gate)
-FP8_PV_D64_MIN_S = int(os.environ.get("MINIWORLD_TRIATTN_D64_MINS", "1024"))
+#: 1.04-1.06 at L256-512, 1.01 at L768, 0.986 at L1024, 0.944 at L1536, 0.930 at L2048; docs/fp8.md).  ``FOLDJET_ENGINE_TRIATTN_D64_MINS=<s>`` overrides it (0 = no gate)
+FP8_PV_D64_MIN_S = int(os.environ.get("FOLDJET_ENGINE_TRIATTN_D64_MINS", "1024"))
 
 
 #: True: V on two e4m3 planes (hi, and the rounding residual x16 rounded again): V^T [B, N, H, 2, 32, S], PV on m64n72k32; the V rounding error falls
@@ -383,7 +384,7 @@ def core_h16() -> Any:
     return _F8Core if FP8_PV and (not FP8_PV_FUSED or FP8_PV_UNFUSED) else _core_h16()
 
 
-#: Models whose end-level accuracy was checked with the FP8 PV route (FoldForge, 200 steps, trunk seeds 0-3: same-seed RMSD inside the bf16 trunk-seed spread),
+#: Models whose end-level accuracy was checked with the FP8 PV route (FoldJet, 200 steps, trunk seeds 0-3: same-seed RMSD inside the bf16 trunk-seed spread),
 #: with the call sites checked: "fused" = the d_pair-128 front that writes V^T itself, "unfused" = the other fronts through the standalone V^T pass (gated by S).
 #: NOT a general route: Boltz-2 9c90 is bistable and flips under V rounding, so "boltz2" is deliberately absent.  Extend only after an end-level check.
 #: "af3" (3.0.0): fused + unfused, end level on 4 targets x 4 trunk seeds (docs/fp8.md "widened scope") and FoldBench 27 targets with every route
@@ -421,7 +422,7 @@ def disable_fp8_pv() -> None:
 
 
 def _fp8_preset_at_import() -> None:
-    """``MINIWORLD_FP8=<preset>`` with ``MINIWORLD_FP8_MODEL=<model>`` (foldjet_engine.fp8): the TriAttn FP8 routes validated for that model
+    """``FOLDJET_ENGINE_FP8=<preset>`` with ``FOLDJET_ENGINE_FP8_MODEL=<model>`` (foldjet_engine.fp8): the TriAttn FP8 routes validated for that model
     (call-site kinds, e4m3 q / k) from the start; no model or an unlisted one: the default fp16 core."""
     if _fp8_switch.preset() is not None:
         _fp8_switch.enable_triattn(*_fp8_switch.triattn_for(_fp8_switch.model()))

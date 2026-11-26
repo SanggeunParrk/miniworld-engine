@@ -4,7 +4,7 @@
   reference block as closely as the LayerNorm-then-two-GEMMs step did, for a conditioning shared by the samples (stride 0) and one per
   sample, at d_cond 384 and 768, sequential and parallel blocks, the up-gate transition (Boltz-2).
 - The conditioning GEMM runs on a side stream from the previous block's start (``_cond_gemm``): a captured 12-block stack replayed after the
-  conditioning was refilled in place gives the eager output of the new conditioning, bitwise -- also under ``static_inputs()`` (FoldForge's
+  conditioning was refilled in place gives the eager output of the new conditioning, bitwise -- also under ``static_inputs()`` (FoldJet's
   denoiser graph makes the step's conditioning inside the graph: nothing made from it may outlive a replay).
 - The bf16 SwiGLU GEMM's 128 x 128 tiles (``ht`` 64) and its up-gate form against an fp32 reference.
 """

@@ -1,5 +1,6 @@
 """Native K1/K3 inference, packaged with its measured tile table and CUDA sources."""
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
 import json
 import os
 from collections import OrderedDict
@@ -15,10 +16,10 @@ from foldjet_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
 from foldjet_engine.kernels.trimul_inproj.cuda import _h100_infer_kernel as K
 
 
-#: Default on (2.5.12; MINIWORLD_TRIMUL_BIDIR_PORT_K3=0 switches it off): the bidirectional D128 inference call (L >= 160, no mask or a [B, L] token mask) runs the packaged K1 in its save-statistics l2 form (planes unchanged),
+#: Default on (2.5.12; FOLDJET_ENGINE_TRIMUL_BIDIR_PORT_K3=0 switches it off): the bidirectional D128 inference call (L >= 160, no mask or a [B, L] token mask) runs the packaged K1 in its save-statistics l2 form (planes unchanged),
 #: the contractions, and the B200-style port's any-L K3 (LayerNorms folded into the weights, LN_in statistics from K1) instead of the packaged K3.
 #: The output is NOT bit-identical to the packaged K3 (different rounding of the folded affine); within the engine accuracy standard on every registry case (BidirectionalTriangleMultiplication backend_versions cuda:h100_sm90 6); see docs/h100/trimul.md.
-PORT_K3 = os.environ.get("MINIWORLD_TRIMUL_BIDIR_PORT_K3", "1") != "0"
+PORT_K3 = os.environ.get("FOLDJET_ENGINE_TRIMUL_BIDIR_PORT_K3", "1") != "0"
 #: below this length the fold launch (2 us) eats the K3 gain (D128 L128: 1.007 of the packaged route, L160: 0.977)
 PORT_K3_MIN_LENGTH = 160
 #: K1 tiles (BI, BJ, NSLOT, SKCH) with a save-statistics l2 instantiation in the (128, 256) unit (tmn_sm90_unit.cuh)

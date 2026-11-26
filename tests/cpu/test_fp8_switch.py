@@ -1,7 +1,7 @@
 """The FP8 backend ``engine-fp8`` (name resolution, its scope per module call, outside the judge) and the lower-level switch
-(``foldjet_engine.fp8``): ``MINIWORLD_FP8=<preset>`` / ``fp8.enable(preset)`` map to the per-route switches;
+(``foldjet_engine.fp8``): ``FOLDJET_ENGINE_FP8=<preset>`` / ``fp8.enable(preset)`` map to the per-route switches;
 an explicitly set per-route variable wins; unset = every route off (the default route). TriAttn FP8 only for a model in
-``fp8.TRIATTN_MODELS`` (``MINIWORLD_FP8_MODEL`` / ``enable(model=)``); FP8 is outside the judge (no registry dtype, no judge / measure path)."""
+``fp8.TRIATTN_MODELS`` (``FOLDJET_ENGINE_FP8_MODEL`` / ``enable(model=)``); FP8 is outside the judge (no registry dtype, no judge / measure path)."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ import pytest
 from foldjet_engine import fp8
 
 _STATUS = "import json; from foldjet_engine import fp8; print(json.dumps(fp8.status()))"
-_ROUTE_VARS = ("MINIWORLD_FP8", *fp8.PRESETS["safe"], "MINIWORLD_ATOMDIT_FP8_B200", "MINIWORLD_TOKEN_DIT_FP8_B200")  # "MINIWORLD_FP8" also covers MINIWORLD_FP8_MODEL
+_ROUTE_VARS = ("FOLDJET_ENGINE_FP8", *fp8.PRESETS["safe"], "FOLDJET_ENGINE_ATOMDIT_FP8_B200", "FOLDJET_ENGINE_TOKEN_DIT_FP8_B200")  # "FOLDJET_ENGINE_FP8" also covers FOLDJET_ENGINE_FP8_MODEL
 _PKG = Path(fp8.__file__).resolve().parent
 
 
@@ -68,16 +68,16 @@ def _routes(status: dict) -> dict:
 
 
 def test_env_preset(monkeypatch):
-    for k in (*_ROUTE_VARS, "MINIWORLD_FP8_MODEL"):
+    for k in (*_ROUTE_VARS, "FOLDJET_ENGINE_FP8_MODEL"):
         monkeypatch.delenv(k, raising=False)
-    assert fp8.preset() is None and fp8.env("MINIWORLD_TRIMUL_FP8") is None and fp8.model() is None
-    monkeypatch.setenv("MINIWORLD_FP8", "safe")
-    assert fp8.preset() == "safe" and fp8.env("MINIWORLD_TRIMUL_FP8") == "calib"
-    monkeypatch.setenv("MINIWORLD_TRIMUL_FP8", "")  # explicitly off wins over the preset
-    assert fp8.env("MINIWORLD_TRIMUL_FP8") == ""
-    monkeypatch.setenv("MINIWORLD_FP8_MODEL", " AF3 ")
+    assert fp8.preset() is None and fp8.env("FOLDJET_ENGINE_TRIMUL_FP8") is None and fp8.model() is None
+    monkeypatch.setenv("FOLDJET_ENGINE_FP8", "safe")
+    assert fp8.preset() == "safe" and fp8.env("FOLDJET_ENGINE_TRIMUL_FP8") == "calib"
+    monkeypatch.setenv("FOLDJET_ENGINE_TRIMUL_FP8", "")  # explicitly off wins over the preset
+    assert fp8.env("FOLDJET_ENGINE_TRIMUL_FP8") == ""
+    monkeypatch.setenv("FOLDJET_ENGINE_FP8_MODEL", " AF3 ")
     assert fp8.model() == "af3"
-    monkeypatch.setenv("MINIWORLD_FP8", "fastest")
+    monkeypatch.setenv("FOLDJET_ENGINE_FP8", "fastest")
     with pytest.raises(ValueError):
         fp8.preset()
 
@@ -95,18 +95,18 @@ def test_triattn_whitelist():
 
 def test_default_is_off():
     assert _routes(_status_in_process()) == OFF
-    assert _routes(_status_in_process(MINIWORLD_FP8_MODEL="af3")) == OFF  # the model alone switches nothing on
+    assert _routes(_status_in_process(FOLDJET_ENGINE_FP8_MODEL="af3")) == OFF  # the model alone switches nothing on
 
 
 def test_env_safe_without_model_keeps_triattn_off():
-    assert _routes(_status_in_process(MINIWORLD_FP8="safe")) == SAFE
-    st = _status_in_process(MINIWORLD_FP8="safe", MINIWORLD_TOKEN_DIT_FP8="", MINIWORLD_PWA_FP8_GUARD="lazy")
+    assert _routes(_status_in_process(FOLDJET_ENGINE_FP8="safe")) == SAFE
+    st = _status_in_process(FOLDJET_ENGINE_FP8="safe", FOLDJET_ENGINE_TOKEN_DIT_FP8="", FOLDJET_ENGINE_PWA_FP8_GUARD="lazy")
     assert _routes(st) == {**SAFE, "token_dit": []} and st["guard"]["pwa"] == "lazy"
 
 
 @pytest.mark.parametrize("model", ["af3", "protenix1", "opendde", "protenix2", "openfold3", "rosettafold3", "chai1", "intellifold2", "boltz2"])
 def test_env_safe_with_model(model):
-    st = _status_in_process(MINIWORLD_FP8="safe", MINIWORLD_FP8_MODEL=model)
+    st = _status_in_process(FOLDJET_ENGINE_FP8="safe", FOLDJET_ENGINE_FP8_MODEL=model)
     assert _routes(st) == {**SAFE, "triattn": TRIATTN_OF.get(model, NO_TRIATTN)}
 
 
@@ -119,9 +119,9 @@ def test_enable_disable_api():
         "fp8.enable('safe'); out.append(fp8.status())\n"
         "fp8.disable(); out.append(fp8.status()); print(json.dumps(out))"
     )
-    # MINIWORLD_FP8_MODEL is not read by enable(): set it to show that
+    # FOLDJET_ENGINE_FP8_MODEL is not read by enable(): set it to show that
     out = subprocess.run(
-        [sys.executable, "-c", code], env={**_clean_env(), "MINIWORLD_FP8_MODEL": "af3"}, capture_output=True, text=True, check=True
+        [sys.executable, "-c", code], env={**_clean_env(), "FOLDJET_ENGINE_FP8_MODEL": "af3"}, capture_output=True, text=True, check=True
     )
     a, *per_model, again, off = json.loads(out.stdout.strip().splitlines()[-1])
     assert _routes(a) == SAFE and set(a["guard"].values()) == {"lazy"}
@@ -265,7 +265,7 @@ out["seen"] = seen[:]
 seen.clear()
 import copy
 leaf = Leaf(backend="engine-fp8").eval()
-leaf._forward_cuda(x)  # a runtime that calls _forward_<backend> directly (FoldForge's guard)
+leaf._forward_cuda(x)  # a runtime that calls _forward_<backend> directly (FoldJet's guard)
 c = copy.deepcopy(leaf)
 out["copy_ok"] = c._forward_cuda.module is c and leaf._forward_cuda.module is leaf
 c.set_backend("cuda")
@@ -284,7 +284,7 @@ print(json.dumps(out))
 
 
 @pytest.mark.parametrize(
-    ("env", "model"), [({}, "af3"), ({}, None), ({"MINIWORLD_FP8_MODEL": "protenix1"}, None), ({"MINIWORLD_FP8": "safe"}, "boltz2")]
+    ("env", "model"), [({}, "af3"), ({}, None), ({"FOLDJET_ENGINE_FP8_MODEL": "protenix1"}, None), ({"FOLDJET_ENGINE_FP8": "safe"}, "boltz2")]
 )
 def test_engine_fp8_scope(env, model):
     """An engine-fp8 module's call runs with the ``safe`` routes (+ the TriAttn part of its model); a module on another backend called inside
@@ -293,8 +293,8 @@ def test_engine_fp8_scope(env, model):
     proc = subprocess.run([sys.executable, "-c", code], env={**_clean_env(), **env}, capture_output=True, text=True, check=False)
     assert proc.returncode == 0, proc.stderr[-3000:]
     out = json.loads(proc.stdout.strip().splitlines()[-1])
-    base = SAFE if env.get("MINIWORLD_FP8") else OFF  # the process preset without MINIWORLD_FP8_MODEL: no TriAttn part
-    on = {**SAFE, "triattn": TRIATTN_OF.get(model or env.get("MINIWORLD_FP8_MODEL"), NO_TRIATTN)}
+    base = SAFE if env.get("FOLDJET_ENGINE_FP8") else OFF  # the process preset without FOLDJET_ENGINE_FP8_MODEL: no TriAttn part
+    on = {**SAFE, "triattn": TRIATTN_OF.get(model or env.get("FOLDJET_ENGINE_FP8_MODEL"), NO_TRIATTN)}
     assert out["before"] == base and out["after"] == base and out["after_refusal"] == base
     assert out["scopes"] == [] and out["scopes2"] == [] and out.get("refused")
     kinds = [k for k, _ in out["seen"]]
@@ -329,9 +329,9 @@ def test_b200_transition_route_follows_the_preset():
         return out.stdout.strip().splitlines()[-1]
 
     assert policy() == "None"  # default: off
-    assert policy(MINIWORLD_FP8="safe") == "'calib'"
-    assert policy(MINIWORLD_FP8="safe", MINIWORLD_TRANSITION_FP8="") == "None"  # an explicitly set per-route variable wins
-    assert policy(MINIWORLD_TRANSITION_FP8="calib") == "'calib'"
+    assert policy(FOLDJET_ENGINE_FP8="safe") == "'calib'"
+    assert policy(FOLDJET_ENGINE_FP8="safe", FOLDJET_ENGINE_TRANSITION_FP8="") == "None"  # an explicitly set per-route variable wins
+    assert policy(FOLDJET_ENGINE_TRANSITION_FP8="calib") == "'calib'"
 
 
 # ---- the final B200 route table (n14 integration: TriMul / TriAttn / Transition replace the slot module, the atom DiT rows route is opt-in)
@@ -344,7 +344,7 @@ def test_b200_final_route_table():
     for slot in ("opm", "pwa", "token_dit"):
         assert not fp8.serves_sm100(slot), slot
     # the atom DiT rows route is NOT in the preset (measured effect <= 0.3 percent, outside the judge): no variable of the preset names it
-    assert "MINIWORLD_ATOMDIT_FP8_B200" not in fp8.PRESETS["safe"]
+    assert "FOLDJET_ENGINE_ATOMDIT_FP8_B200" not in fp8.PRESETS["safe"]
 
 
 _B200_SWITCHES = (
@@ -365,18 +365,18 @@ def test_b200_routes_follow_the_preset_with_per_route_precedence():
     off = _b200_switches()
     assert off["trimul"] is None and off["transition"] is None and off["opm"] is None and off["pwa"] is False and off["td"] == [] and off["atom_b200"] == []
     assert off["widths"] == [128, 256, 512, 768]  # agent F: the Transition WIDTHS default
-    on = _b200_switches(MINIWORLD_FP8="safe")
+    on = _b200_switches(FOLDJET_ENGINE_FP8="safe")
     assert (on["trimul"], on["transition"], on["opm"], on["pwa"], on["td"]) == ("calib", "calib", "bound", True, ["expand"])
     assert on["atom_b200"] == []  # not in the preset
     assert on["up"] is True and on["rf3"] is True  # token DiT B200_UP / B200_RF3 ride on the `expand` placement
     # an explicitly set per-route variable wins over the preset (also set to "")
-    p = _b200_switches(MINIWORLD_FP8="safe", MINIWORLD_TRIMUL_FP8="", MINIWORLD_OPM_FP8="", MINIWORLD_PWA_FP8="0", MINIWORLD_TRANSITION_FP8="", MINIWORLD_TOKEN_DIT_FP8="")
+    p = _b200_switches(FOLDJET_ENGINE_FP8="safe", FOLDJET_ENGINE_TRIMUL_FP8="", FOLDJET_ENGINE_OPM_FP8="", FOLDJET_ENGINE_PWA_FP8="0", FOLDJET_ENGINE_TRANSITION_FP8="", FOLDJET_ENGINE_TOKEN_DIT_FP8="")
     assert (p["trimul"], p["transition"], p["opm"], p["pwa"], p["td"]) == (None, None, None, False, [])
     # the atom DiT rows route is switched by its own variable only (with or without the preset)
-    assert _b200_switches(MINIWORLD_ATOMDIT_FP8_B200="1")["atom_b200"] == ["post", "pre"]
-    assert _b200_switches(MINIWORLD_FP8="safe", MINIWORLD_ATOMDIT_FP8_B200="pre")["atom_b200"] == ["pre"]
-    assert _b200_switches(MINIWORLD_FP8="safe", MINIWORLD_ATOMDIT_FP8="1")["atom_b200"] == []  # the H100 variable does not reach the B200 route
-    assert _b200_switches(MINIWORLD_FP8="safe", MINIWORLD_TOKEN_DIT_FP8_B200_UP="0")["up"] is False
+    assert _b200_switches(FOLDJET_ENGINE_ATOMDIT_FP8_B200="1")["atom_b200"] == ["post", "pre"]
+    assert _b200_switches(FOLDJET_ENGINE_FP8="safe", FOLDJET_ENGINE_ATOMDIT_FP8_B200="pre")["atom_b200"] == ["pre"]
+    assert _b200_switches(FOLDJET_ENGINE_FP8="safe", FOLDJET_ENGINE_ATOMDIT_FP8="1")["atom_b200"] == []  # the H100 variable does not reach the B200 route
+    assert _b200_switches(FOLDJET_ENGINE_FP8="safe", FOLDJET_ENGINE_TOKEN_DIT_FP8_B200_UP="0")["up"] is False
 
 
 # ---- RTX 5090 (sm_120a): TriAttn / TriMul / Transition replace the slot module; the Transition follows the preset exactly as on the H100 (2026-11-23)
@@ -390,7 +390,7 @@ def test_sm120_route_table():
     assert fp8.SM120_ROUTES["atom_dit"] == "foldjet_engine.kernels.dit_variants.cuda.atom_fp8_sm120"
     assert not fp8.SM120_OPTIN  # nothing outside the preset on the 5090 any more
     # the 5090 slots are switched by the H100 preset variables, except the Transition (SM120_PRESET_EXCLUDED: explicit opt-in on the 5090)
-    assert fp8.PRESETS["safe"]["MINIWORLD_TRANSITION_FP8"] == "calib"  # (the H100 preset value; the 5090 does not read it)
+    assert fp8.PRESETS["safe"]["FOLDJET_ENGINE_TRANSITION_FP8"] == "calib"  # (the H100 preset value; the 5090 does not read it)
     assert fp8.SM120_PRESET_EXCLUDED == frozenset({"transition"})
 
 
@@ -408,16 +408,16 @@ def _sm120_tr(**env) -> dict:
 def test_sm120_transition_route_is_explicit_opt_in():
     off = _sm120_tr()
     assert off == {"policy": None, "guard": "sync", "minrows": None, "widths": [128, 256, 384, 512], "headroom": 16.0}
-    assert _sm120_tr(MINIWORLD_FP8="safe")["policy"] is None  # NOT in the safe preset on the 5090 (owner decision 2026-11-23, docs/fp8.md)
-    assert _sm120_tr(MINIWORLD_FP8="safe", MINIWORLD_TRANSITION_FP8="calib")["policy"] == "calib"  # the explicit variable turns it on
-    assert _sm120_tr(MINIWORLD_FP8="safe", MINIWORLD_TRANSITION_FP8="")["policy"] is None  # an explicitly set per-route variable wins
-    assert _sm120_tr(MINIWORLD_TRANSITION_FP8="calib")["policy"] == "calib"
+    assert _sm120_tr(FOLDJET_ENGINE_FP8="safe")["policy"] is None  # NOT in the safe preset on the 5090 (owner decision 2026-11-23, docs/fp8.md)
+    assert _sm120_tr(FOLDJET_ENGINE_FP8="safe", FOLDJET_ENGINE_TRANSITION_FP8="calib")["policy"] == "calib"  # the explicit variable turns it on
+    assert _sm120_tr(FOLDJET_ENGINE_FP8="safe", FOLDJET_ENGINE_TRANSITION_FP8="")["policy"] is None  # an explicitly set per-route variable wins
+    assert _sm120_tr(FOLDJET_ENGINE_TRANSITION_FP8="calib")["policy"] == "calib"
     # the guard contract variables of the H100 route
-    g = _sm120_tr(MINIWORLD_FP8="safe", MINIWORLD_TRANSITION_FP8_GUARD="lazy", MINIWORLD_TRANSITION_FP8_MINROWS="0")
+    g = _sm120_tr(FOLDJET_ENGINE_FP8="safe", FOLDJET_ENGINE_TRANSITION_FP8_GUARD="lazy", FOLDJET_ENGINE_TRANSITION_FP8_MINROWS="0")
     assert (g["guard"], g["minrows"]) == ("lazy", 0)
     # the former opt-in variables stay as aliases and win over the generic names when set
-    assert _sm120_tr(MINIWORLD_TRANSITION_FP8_SM120="calib")["policy"] == "calib"
-    assert _sm120_tr(MINIWORLD_FP8="safe", MINIWORLD_TRANSITION_FP8_SM120="")["policy"] is None
-    a = _sm120_tr(MINIWORLD_TRANSITION_FP8_GUARD="lazy", MINIWORLD_TRANSITION_FP8_SM120_GUARD="off", MINIWORLD_TRANSITION_FP8_SM120_MINROWS="4096")
+    assert _sm120_tr(FOLDJET_ENGINE_TRANSITION_FP8_SM120="calib")["policy"] == "calib"
+    assert _sm120_tr(FOLDJET_ENGINE_FP8="safe", FOLDJET_ENGINE_TRANSITION_FP8_SM120="")["policy"] is None
+    a = _sm120_tr(FOLDJET_ENGINE_TRANSITION_FP8_GUARD="lazy", FOLDJET_ENGINE_TRANSITION_FP8_SM120_GUARD="off", FOLDJET_ENGINE_TRANSITION_FP8_SM120_MINROWS="4096")
     assert (a["guard"], a["minrows"]) == ("off", 4096)
-    assert _sm120_tr(MINIWORLD_TRANSITION_FP8_SM120_WIDTHS="128")["widths"] == [128]
+    assert _sm120_tr(FOLDJET_ENGINE_TRANSITION_FP8_SM120_WIDTHS="128")["widths"] == [128]

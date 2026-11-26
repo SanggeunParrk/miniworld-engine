@@ -1,4 +1,4 @@
-"""The ``*_shared_cond`` requirement streams (FoldForge's conditioning shared across the samples as a stride-0 ``expand``): ``make_inputs``
+"""The ``*_shared_cond`` requirement streams (FoldJet's conditioning shared across the samples as a stride-0 ``expand``): ``make_inputs``
 gives the shared layout, the measurers keep it expanded, and every other input is handled exactly as before. CPU only."""
 
 from __future__ import annotations

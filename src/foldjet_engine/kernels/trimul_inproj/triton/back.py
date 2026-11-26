@@ -105,7 +105,7 @@ def _back_kernel(
     # this kernel at K = N = 128, while the whole module sat 1.2 ms behind cuequivariance.
     # KG == K reproduces the old kernel exactly: every loop below is single-trip in that case.
     # 64-bit offsets: rm is int64 (the program id); the channel-major `tri` reads index `channel * M`, which wrapped in int32 once
-    # K * M > 2**31 (OpenDDE's refiner pair, d 384 at L 2944: 3.3e9 elements; FoldForge 5I28 A100 n = 12: an illegal address on A100, a
+    # K * M > 2**31 (OpenDDE's refiner pair, d 384 at L 2944: 3.3e9 elements; FoldJet 5I28 A100 n = 12: an illegal address on A100, a
     # silently wrong result on H100). WIDE (set by the launcher from K * M) casts the channel index first; below the bound the kernel is
     # the 32-bit one (an always-on cast cost 4-5 % on A100 at d 384).
     pid = tl.program_id(0).to(tl.int64)

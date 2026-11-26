@@ -5,7 +5,7 @@ weights, so the copy is one of the weight forms of ``kernels._capture.param_form
 tensor at the same version, scoped to a CUDA-graph capture like every weight pack, kept while the weight is alive. Weights that require
 grad outside no_grad are never cached.
 
-``_CACHE`` is that store (``_capture._FORMS``); FoldForge clears it before it loads a model.
+``_CACHE`` is that store (``_capture._FORMS``); FoldJet clears it before it loads a model.
 """
 
 import torch

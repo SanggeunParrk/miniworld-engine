@@ -116,7 +116,7 @@ def _gelu_grad(x):
 #
 # The cache NARROWS, it does not pin: Triton still autotunes among the cached top-K, a
 # stale cache is detected by config_space_hash and falls back to the full grid, and
-# MINIWORLD_RUN_AUTOTUNE=1 ignores it entirely.  Config choice is performance-only --
+# FOLDJET_ENGINE_RUN_AUTOTUNE=1 ignores it entirely.  Config choice is performance-only --
 # every candidate computes the same arithmetic -- so a missing or wrong cache can only
 # ever be slower, never incorrect.
 #

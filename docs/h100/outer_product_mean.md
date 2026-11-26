@@ -131,7 +131,7 @@ dA / dB, `chai_projbwd` (projection and MSA LN backward), and dgamma / dbeta of 
 
 ### FP8 (EXPERIMENTAL, opt-in, off by default)
 
-`MINIWORLD_OPM_FP8=bound` (`integrations/opm_fp8.py`): inference with the grouped product on e4m3 operands -- the wide prologue's FP8 build
+`FOLDJET_ENGINE_OPM_FP8=bound` (`integrations/opm_fp8.py`): inference with the grouped product on e4m3 operands -- the wide prologue's FP8 build
 (`-DMINIWORLD_OPM_FP8`) writes A2 / BT as e4m3 bytes at a static power-of-two scale bounded from the weights, a cuBLASLt e4m3 GEMM forms O,
 the default count table and epilogue finish. 1.7-2.0x faster than the default at depth 4096-16384; judge metric 0.6-1.4 %. Gates, error and
 speed tables: [fp8](../fp8.md) "OuterProductMean forward".

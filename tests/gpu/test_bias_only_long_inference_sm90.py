@@ -1,4 +1,4 @@
-"""H100 bias-only token DiT inference past L 3072 (FoldForge AF3 n >= 25: 3200+ tokens): the softmax rows keep a row of up to 3072 keys in registers and
+"""H100 bias-only token DiT inference past L 3072 (FoldJet AF3 n >= 25: 3200+ tokens): the softmax rows keep a row of up to 3072 keys in registers and
 run two passes over longer ones (``bias_only_dit_rows.cu`` softmax_rows_long_kernel, ``bias_only_dit_f32_rows.cu`` softmax_rows_long_k), the PV cores
 (pvx / pvx32) take L up to 8192, and a call past 3072 must fit the device memory (a refusal, never an out-of-memory).  The cuda backend must serve these
 lengths (no CUDA hole), match a row-chunked float64 reference as closely as the ``pytorch`` backend does (the engine accuracy standard, not

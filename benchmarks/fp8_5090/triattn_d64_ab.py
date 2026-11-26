@@ -1,4 +1,4 @@
-"""Chai-1 TriAttn (64-channel heads) module: default vs the e4m3 d64 route (MINIWORLD_FP8=safe, model chai1), same process, alternating, CUDA graph, 128 MB L2 flush, gates
+"""Chai-1 TriAttn (64-channel heads) module: default vs the e4m3 d64 route (FOLDJET_ENGINE_FP8=safe, model chai1), same process, alternating, CUDA graph, 128 MB L2 flush, gates
 cleared; update error against the float64 module (L <= 512).
 python triattn_d64_ab.py [--rounds N] [--qk] [--model chai1|chai1_confidence] [--ending] [--nomask] L ..."""
 import copy

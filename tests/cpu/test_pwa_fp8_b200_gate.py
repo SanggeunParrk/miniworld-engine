@@ -1,4 +1,4 @@
-"""pwa_fp8_b200: the B200 PWA e4m3 route is OFF unless MINIWORLD_PWA_FP8_B200=1 (FoldForge F3 RoseTTAFold3 n = 12 / 16 non-finite under CUDA graphs with
+"""pwa_fp8_b200: the B200 PWA e4m3 route is OFF unless FOLDJET_ENGINE_PWA_FP8_B200=1 (FoldJet F3 RoseTTAFold3 n = 12 / 16 non-finite under CUDA graphs with
 this route alone, 2026-11-24), and its scale cache is keyed on the weights' versions and shapes, not on the wv pointer alone. CPU only (no kernel runs)."""
 
 import torch

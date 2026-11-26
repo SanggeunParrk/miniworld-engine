@@ -51,6 +51,7 @@ from typing import cast
 
 import torch
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
 from foldjet_engine.kernels import _capture
 from foldjet_engine.kernels._compile import opaque
 from foldjet_engine.kernels._device import num_sms
@@ -200,20 +201,20 @@ def _mm32(a, b, out=None):
 
 _ONES: dict = {}
 
-#: B200: independent stages of a captured training step as parallel branches of the graph (MINIWORLD_TOKEN_B200_STREAMS=0: one chain)
-_STREAMS = os.environ.get("MINIWORLD_TOKEN_B200_STREAMS", "1") != "0"
+#: B200: independent stages of a captured training step as parallel branches of the graph (FOLDJET_ENGINE_TOKEN_B200_STREAMS=0: one chain)
+_STREAMS = os.environ.get("FOLDJET_ENGINE_TOKEN_B200_STREAMS", "1") != "0"
 #: B200: weight gradients straight into their leaves, the rest of the final gradients beside the chain (``_final_b200``; 0: one final kernel)
-_FINAL_B200 = os.environ.get("MINIWORLD_TOKEN_B200_FINAL", "1") != "0"
+_FINAL_B200 = os.environ.get("FOLDJET_ENGINE_TOKEN_B200_FINAL", "1") != "0"
 #: B200 bf16, one sample (2026-11-17, part 7): attn_dkv reads the bias as stored (``sm100.backward(bias_nt=True)``, -DBIASNT=1) -- no
-#: bias_transpose launch on the backward chain (the same values). MINIWORLD_TOKEN_B200_BIASNT=0: the transpose as before; 1: one
+#: bias_transpose launch on the backward chain (the same values). FOLDJET_ENGINE_TOKEN_B200_BIASNT=0: the transpose as before; 1: one
 #: sample only (part 7); 2 (part 10, default): every sample count -- the bias is shared by the samples, attn_dkv's tile does not depend on one
-_BIASNT_B200 = int(os.environ.get("MINIWORLD_TOKEN_B200_BIASNT", "2"))
+_BIASNT_B200 = int(os.environ.get("FOLDJET_ENGINE_TOKEN_B200_BIASNT", "2"))
 #: B200 training (part 10): both to_scale weight gradients on side stream 0 right after dWo (dGg is complete there) instead of behind
-#: the four q | k | v | g weight gradients at the end of side stream 2, the step's last branch (MINIWORLD_TOKEN_B200_GEARLY=0: as before)
-_GEARLY_B200 = os.environ.get("MINIWORLD_TOKEN_B200_GEARLY", "1") != "0"
+#: the four q | k | v | g weight gradients at the end of side stream 2, the step's last branch (FOLDJET_ENGINE_TOKEN_B200_GEARLY=0: as before)
+_GEARLY_B200 = os.environ.get("FOLDJET_ENGINE_TOKEN_B200_GEARLY", "1") != "0"
 #: B200 bf16 training (part 7): attn_dqb on side stream 2 beside attn_dkv (both read only their inputs; dQ / dbias joined before
 #: qknorm_bwd / the pair backward). The two grids are heads x (L / 128)^2 and A heads L / 128 work items: 16 + 16 CTAs at L 128.
-_DQB_SIDE_B200 = os.environ.get("MINIWORLD_TOKEN_B200_DQB_SIDE", "1") != "0"
+_DQB_SIDE_B200 = os.environ.get("FOLDJET_ENGINE_TOKEN_B200_DQB_SIDE", "1") != "0"
 
 
 class _Side:
@@ -383,7 +384,7 @@ def _native_caller_hooks(*tensors, force: bool = False):
 
     The leaves' ``AccumulateGrad`` nodes are NOT hooked: their ``grad += new`` is ATen's ``add_`` in the autograd engine, no Python. (They
     were: a pre- and a post-hook, a ``TorchDispatchMode`` entered and left, and a Python ``__torch_dispatch__`` per accumulation -- one per
-    parameter per backward, ~2,800 per FoldForge training micro step of a 24-block token DiT -- to run ``caller_add90``, which computes
+    parameter per backward, ~2,800 per FoldJet training micro step of a 24-block token DiT -- to run ``caller_add90``, which computes
     exactly what ``add_`` does: T(float(a) + float(b)) per element. The gradients are bitwise the same without it.)
     """
     if not force or torch.compiler.is_compiling():
@@ -648,7 +649,7 @@ def _swiglu_gemm(xt, wab):
 #: (``tdt_epi.mm``, K split 8, the partial tiles summed in rank order over distributed shared memory) -- cuBLAS split K into a
 #: separate reduce kernel, both on the step's tail after the last row pass. Measured r101 L 128 203.9 -> 198.0 us, r144 L 256 214.2 ->
 #: 207.0, r261 L 128 186.6 -> 174-185; at 1024 rows (r286 S 8) 6 % slower, so not there. 0: cuBLAS
-_DC_B200_ROWS = int(os.environ.get("MINIWORLD_TOKEN_B200_DC_ROWS", "256"))
+_DC_B200_ROWS = int(os.environ.get("FOLDJET_ENGINE_TOKEN_B200_DC_ROWS", "256"))
 
 
 #: The option leaves after the canonical ones (``_names_for`` with a model's options): the up-gate weight (Boltz-2) and the flat q / k

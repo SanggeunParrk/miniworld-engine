@@ -1,6 +1,6 @@
 """Automatic dispatch to the A100 (sm_80) AttentionPairBias: hand CUDA but the plain GEMMs (cuBLAS).
 
-Contract: bf16 activations, B >= 1 (one step per batch row: the FoldForge 5I28 confidence head runs its samples as B),
+Contract: bf16 activations, B >= 1 (one step per batch row: the FoldJet 5I28 confidence head runs its samples as B),
 d_single 384 as 8 heads x 48, 12 x 32, 24 x 16 (inference only) or 16 x 24 (AF3's Pairformer single attention; run 32 wide per head, as on
 B200), or d_single 512 as 16 x 32; d_pair 128, no QK-norm, any L, ``implementation="miniworld"`` (engine backend not forced to Triton), sm_80.
 

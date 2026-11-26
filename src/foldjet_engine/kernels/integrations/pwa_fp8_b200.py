@@ -1,4 +1,4 @@
-"""EXPERIMENTAL B200 (sm_100a) e4m3 contraction of MSAPairWeightedAveraging inference (opt-in ``MINIWORLD_PWA_FP8=1``, default OFF; docs/b200/fp8.md "PWA").
+"""EXPERIMENTAL B200 (sm_100a) e4m3 contraction of MSAPairWeightedAveraging inference (opt-in ``FOLDJET_ENGINE_PWA_FP8=1``, default OFF; docs/b200/fp8.md "PWA").
 
 o[h] = w[h] . v[h] (K = the key index j, the stage that grows with N^2 S) on e4m3 operands: w (a probability, <= 1) with the fixed scale 2^8 (cannot saturate), v with a
 static power-of-two scale from the weights alone (``bound`` policy of the OuterProductMean route: |y_k| <= sqrt(d_msa - 1)|gamma_k| + |beta_k|, so max_c sum_k |Wv_ck| (...) bounds
@@ -16,16 +16,18 @@ from pathlib import Path
 
 import torch
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
+
 from . import opm_fp8 as _o
 from . import pwa_fp8 as _h
 
 E4M3 = torch.float8_e4m3fn
 #: gates from the B200 measurement (docs/b200/fp8.md): head dim 32 from N 1280 (0.95 at 1280, 0.82 at 2048), 16 from 1792 (0.91 at 2048), 8 never (0.95-0.97 at 2048: below the 5 % bar); None = this rule
 MIN_N: int | None = None
-#: 2026-11-24: OFF unless ``MINIWORLD_PWA_FP8_B200=1`` (on top of ``MINIWORLD_PWA_FP8`` / the ``safe`` preset): FoldForge F3 RoseTTAFold3 5I28 n = 12 / 16
+#: 2026-11-24: OFF unless ``FOLDJET_ENGINE_PWA_FP8_B200=1`` (on top of ``FOLDJET_ENGINE_PWA_FP8`` / the ``safe`` preset): FoldJet F3 RoseTTAFold3 5I28 n = 12 / 16
 #: (compile + CUDA graphs) gave non-finite coordinates with this route and only with it (every other FP8 route alone finite; ``safe`` without PWA
 #: finite, 0.90x bf16); its eager calls stay in range (max |v8| 20 of 448), the fault is in the captured replay, not localized yet
-B200_ON: bool = os.environ.get("MINIWORLD_PWA_FP8_B200", "") == "1"
+B200_ON: bool = os.environ.get("FOLDJET_ENGINE_PWA_FP8_B200", "") == "1"
 _CACHES: dict = {}
 STATS = _h.STATS
 

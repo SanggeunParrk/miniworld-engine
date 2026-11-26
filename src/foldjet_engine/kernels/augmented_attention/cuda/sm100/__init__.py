@@ -39,6 +39,8 @@ Everything else keeps the Triton path, and so do fake tensors and torch.compile 
 
 from __future__ import annotations
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
+
 import collections
 import functools
 import os
@@ -53,10 +55,10 @@ from foldjet_engine.kernels._nvcc import build_failed, engine_jit_root
 H, D = 16, 48
 _dir = Path(__file__).parent
 #: B200 fp32 token DiT inference at one sample: the TF32 core's query-tile-pair build (0: the sample-pair schedule)
-_TF32_QPAIR = os.environ.get("MINIWORLD_TOKEN_B200_TF32_QPAIR", "1") != "0"
+_TF32_QPAIR = os.environ.get("FOLDJET_ENGINE_TOKEN_B200_TF32_QPAIR", "1") != "0"
 #: B200 fp32 token DiT inference at one sample (2026-11-17, AttentionPairBias part 7): the TF32 core's key split (``attn_inf_tf32 -DQPAIR
-#: -DKSPLIT`` + ``ksplit_combine32``) where the query-tile pairs leave most SMs idle. MINIWORLD_TOKEN_B200_TF32_KSPLIT=n forces n chunks (1: off).
-_TF32_KSPLIT = os.environ.get("MINIWORLD_TOKEN_B200_TF32_KSPLIT")
+#: -DKSPLIT`` + ``ksplit_combine32``) where the query-tile pairs leave most SMs idle. FOLDJET_ENGINE_TOKEN_B200_TF32_KSPLIT=n forces n chunks (1: off).
+_TF32_KSPLIT = os.environ.get("FOLDJET_ENGINE_TOKEN_B200_TF32_KSPLIT")
 _KS32_NS = (2, 3, 4, 5, 6, 8, 10, 12, 16)  # chunk counts ksplit_combine32 is built for
 
 
@@ -835,8 +837,8 @@ def _tmn(t, dims, stride_bytes, box, **kw):
 
 #: most chunks a work item's keys are split into (``apb_rows_sm100.cu`` ksplit_combine's NSMAX)
 KSPLIT_MAX = 16
-#: MINIWORLD_APB_B200_KSPLIT: force the inference core's key split (1: the unsplit core); unset: ``apb_ksplit``'s rule
-_KSPLIT_FORCED = os.environ.get("MINIWORLD_APB_B200_KSPLIT")
+#: FOLDJET_ENGINE_APB_B200_KSPLIT: force the inference core's key split (1: the unsplit core); unset: ``apb_ksplit``'s rule
+_KSPLIT_FORCED = os.environ.get("FOLDJET_ENGINE_APB_B200_KSPLIT")
 #: the shortest L the rule splits at
 _KSPLIT_MIN_L = 384
 
@@ -1115,8 +1117,8 @@ def apb_backward_stages(
 
 
 #: pair_bwd.cu builds a = a_hi + a_lo (PB_SPLIT, its default; 2026-11-17) at <= 16 heads: row 148 L 128 grad:pair 1.25 -> 1.00 x tol, no
-#: measurable cost there; 24 heads keep the single bf16 a (the split doubles K of D = a Wf: L 768 +8 us). MINIWORLD_APB_B200_PB_SPLIT=0: never.
-_PB_SPLIT_OFF = os.environ.get("MINIWORLD_APB_B200_PB_SPLIT") == "0"
+#: measurable cost there; 24 heads keep the single bf16 a (the split doubles K of D = a Wf: L 768 +8 us). FOLDJET_ENGINE_APB_B200_PB_SPLIT=0: never.
+_PB_SPLIT_OFF = os.environ.get("FOLDJET_ENGINE_APB_B200_PB_SPLIT") == "0"
 
 
 def _pb_split_defs(heads: int) -> tuple[str, ...]:

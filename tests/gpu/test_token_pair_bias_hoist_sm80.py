@@ -2,7 +2,7 @@
 
 A sampler calls every block with the SAME pair at every step; the sm_80 attention used to make the pair bias (pair LayerNorm + head projection, 47 us per
 block call at 128 tokens, 13 % of an ESMFold2 forward) again at each call. The hoist is the same kernel's output, so every call equals the call with the hoist
-off (``MINIWORLD_TOKEN_BIAS_HOIST=0``) BITWISE; a new pair tensor, an in-place change of the pair or of a bias weight, and another key mask are not served the old table.
+off (``FOLDJET_ENGINE_TOKEN_BIAS_HOIST=0``) BITWISE; a new pair tensor, an in-place change of the pair or of a bias weight, and another key mask are not served the old table.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ def _token(dtype: str) -> typing.Any:
 
 
 def _run(m, kw, hoist: bool, monkeypatch: pytest.MonkeyPatch) -> torch.Tensor:
-    monkeypatch.setenv("MINIWORLD_TOKEN_BIAS_HOIST", "1" if hoist else "0")
+    monkeypatch.setenv("FOLDJET_ENGINE_TOKEN_BIAS_HOIST", "1" if hoist else "0")
     with torch.no_grad():
         return m(**kw).clone()
 

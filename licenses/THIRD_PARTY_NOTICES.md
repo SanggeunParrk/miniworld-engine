@@ -1,10 +1,10 @@
 # Third-party notices
 
-MiniWorld Engine is distributed as the `miniworld-engine` source distribution and pure-Python wheel and the wheels of prebuilt kernels,
-`miniworld-engine-kernels-sm90-cu129` (H100) and `miniworld-engine-kernels-sm80-cu129` (A100, from 2.5.2) and `miniworld-engine-kernels-sm120-cu129` (RTX 5090, from 2.5.8). All of them carry this file, the root `LICENSE` and the
+FoldJet Engine is distributed as the `foldjet-engine` source distribution and pure-Python wheel and the wheels of prebuilt kernels,
+`foldjet-engine-kernels-sm90-cu129` (H100) and `foldjet-engine-kernels-sm80-cu129` (A100, from 2.5.2) and `foldjet-engine-kernels-sm120-cu129` (RTX 5090, from 2.5.8) and `foldjet-engine-kernels-sm100-cu129` + `-part2` (B200, from 3.0.12). All of them carry this file, the root `LICENSE` and the
 licence texts in `licenses/`. The package licence expression is `MIT AND Apache-2.0 AND BSD-3-Clause`:
 
-- **MIT** (root `LICENSE`, Copyright (c) 2026 Sanggeun Park): MiniWorld Engine's own code, unless a file says otherwise.
+- **MIT** (root `LICENSE`, Copyright (c) 2026 Sanggeun Park): FoldJet Engine's own code, unless a file says otherwise.
 - **Apache-2.0**: the Anthropic-derived code below. A source file whose header carries `SPDX-License-Identifier: Apache-2.0`
   is distributed under the Apache License, Version 2.0 ([text](Anthropic-Apache-2.0.txt)); a file's own licence line takes
   precedence over the root MIT default.
@@ -12,7 +12,7 @@ licence texts in `licenses/`. The package licence expression is `MIT AND Apache-
 
 ## Anthropic: uplifting-biomolecular-modeling (Apache-2.0)
 
-MiniWorld Engine previously developed its own inference kernels. Anthropic's
+FoldJet Engine previously developed its own inference kernels. Anthropic's
 published biomolecular modeling implementation achieved substantially better
 results on the workloads we studied. Version 2 builds on that work with explicit
 attribution; our contribution is its integration, measured adaptations, and
@@ -27,7 +27,7 @@ The upstream release itself is not redistributed: `third_party/anthropic/upstrea
 backends) is a local clone that is git-ignored and is in no sdist or wheel; `third_party/anthropic/` in the repository holds
 only its pin (`UPSTREAM.json`), a source inventory and local build records.
 
-What MiniWorld Engine carries from it (all paths under `src/foldjet_engine/kernels/`; upstream paths under
+What FoldJet Engine carries from it (all paths under `src/foldjet_engine/kernels/`; upstream paths under
 `common/opt_core/opt_core/kernels/`):
 
 | MiniWorld file(s) | Upstream file(s) | Changes |
@@ -50,7 +50,7 @@ Several Triton kernels and the SWA atom-transformer CUDA/Triton path were moved 
 (github.com/CSSB-SNU/team-gm, not public); each such file names its team-gm source path and commit in its header
 (`vendored from team-gm ...` / `Moved from team-gm ...`). They are distributed under the root MIT licence.
 
-## Compiled kernels in the `miniworld-engine-kernels-*` wheels
+## Compiled kernels in the `foldjet-engine-kernels-*` wheels
 
 Each kernels wheel (`foldjet_engine/_prebuilt/`; docs/install.md, "Prebuilt kernels vs JIT") carries torch extensions and cubins
 compiled by nvcc from this repository's CUDA sources. No library is bundled. Besides the MIT and Anthropic Apache-2.0 code

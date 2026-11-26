@@ -1,10 +1,10 @@
-"""FoldForge R3 and R7 on the ``cuda`` backend (H100 and A100).
+"""FoldJet R3 and R7 on the ``cuda`` backend (H100 and A100).
 
 R3: ``AttentionPairBias`` takes an additive ``extra_pair_bias`` at inference (OpenDDE's structural-token refiner: one [L, L] bias on every
 head), in each accepted form ([L, L], [H, L, L], [B, H, L, L], expanded views), and refuses it with a gradient (the training Functions return
 no gradient for it) instead of dropping it.
 
-R7: the Chai-1 DiT blocks serve FoldForge's mixed layout under the master weights: bf16 ``single`` with fp32 ``cond`` / ``pair`` (token and
+R7: the Chai-1 DiT blocks serve FoldJet's mixed layout under the master weights: bf16 ``single`` with fp32 ``cond`` / ``pair`` (token and
 atom block) and the fp32 sampler glue under bf16 autocast (atom block), the activations rounded to bf16 at the entry.
 """
 

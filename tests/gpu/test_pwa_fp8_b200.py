@@ -1,4 +1,4 @@
-"""B200 MSAPairWeightedAveraging e4m3 contraction (``integrations.pwa_fp8_b200``, opt-in ``MINIWORLD_PWA_FP8=1``, default OFF): route on / off, accuracy against the fp64 gold next
+"""B200 MSAPairWeightedAveraging e4m3 contraction (``integrations.pwa_fp8_b200``, opt-in ``FOLDJET_ENGINE_PWA_FP8=1``, default OFF): route on / off, accuracy against the fp64 gold next
 to the bf16 route, graph == eager, route stats, the shape gate."""
 
 import copy

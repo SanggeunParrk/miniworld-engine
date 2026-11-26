@@ -311,7 +311,7 @@ def test_model_whitelist_table(f8, model, pv_only):
 
 
 def test_env_model_at_import():
-    """MINIWORLD_FP8=safe MINIWORLD_FP8_MODEL=<m> (read at import): af3 fires the e4m3 q / k core at L640, boltz2 / no model do not (one fresh process each)."""
+    """FOLDJET_ENGINE_FP8=safe FOLDJET_ENGINE_FP8_MODEL=<m> (read at import): af3 fires the e4m3 q / k core at L640, boltz2 / no model do not (one fresh process each)."""
     import json
     import os
     import subprocess
@@ -325,15 +325,15 @@ def test_env_model_at_import():
         "with torch.no_grad(), torch.autocast('cuda', torch.bfloat16): m(x, mk)\n"
         "print(json.dumps(fp8.route_stats()['triattn']))"
     )
-    base = {k: v for k, v in os.environ.items() if not k.startswith(("MINIWORLD_FP8", "MINIWORLD_TRIATTN"))}
+    base = {k: v for k, v in os.environ.items() if not k.startswith(("FOLDJET_ENGINE_FP8", "FOLDJET_ENGINE_TRIATTN"))}
 
     def stats(**env):
         out = subprocess.run([sys.executable, "-c", code], env={**base, **env}, capture_output=True, text=True, check=True)
         return json.loads(out.stdout.strip().splitlines()[-1])
 
-    a = stats(MINIWORLD_FP8="safe", MINIWORLD_FP8_MODEL="af3")
+    a = stats(FOLDJET_ENGINE_FP8="safe", FOLDJET_ENGINE_FP8_MODEL="af3")
     assert a["pv_front"] == 1 and a.get("qk", 0) == 1, a
-    for env in ({"MINIWORLD_FP8": "safe", "MINIWORLD_FP8_MODEL": "boltz2"}, {"MINIWORLD_FP8": "safe"}, {"MINIWORLD_FP8_MODEL": "af3"}):
+    for env in ({"FOLDJET_ENGINE_FP8": "safe", "FOLDJET_ENGINE_FP8_MODEL": "boltz2"}, {"FOLDJET_ENGINE_FP8": "safe"}, {"FOLDJET_ENGINE_FP8_MODEL": "af3"}):
         st = stats(**env)
         assert st["pv_front"] == 0 and st.get("qk", 0) == 0, (env, st)
 
@@ -362,7 +362,7 @@ def test_late_qk_calibration(f8):
 
 # ---------------------------------------------------------------------------------------------------------------- 64-channel heads (kind d64)
 # Chai-1's trunk / confidence-head triangle attention (d_pair 256, 4 heads x 64 channels) on the RTX 5090 runs sm80_wide.variant_forward_ops; the e4m3 core of 64-channel heads
-# (sm120_fp8.serves_d64 / route(hd=64)) replaces its core + gate_rows when fp8.TRIATTN_MODELS turns the d64 kind on (MINIWORLD_FP8_MODEL=chai1).
+# (sm120_fp8.serves_d64 / route(hd=64)) replaces its core + gate_rows when fp8.TRIATTN_MODELS turns the d64 kind on (FOLDJET_ENGINE_FP8_MODEL=chai1).
 
 
 def _make_chai(model="chai1", starting=True, seed=1):
@@ -542,7 +542,7 @@ def test_d64_capture_before_calibration_runs_default(f8):
 
 
 def test_d64_env_model_at_import():
-    """MINIWORLD_FP8=safe MINIWORLD_FP8_MODEL=chai1 (read at import) turns the d64 core on exactly as on the H100; af3 / no model leave the Chai-1 module on the default core."""
+    """FOLDJET_ENGINE_FP8=safe FOLDJET_ENGINE_FP8_MODEL=chai1 (read at import) turns the d64 core on exactly as on the H100; af3 / no model leave the Chai-1 module on the default core."""
     import json
     import os
     import subprocess
@@ -556,21 +556,21 @@ def test_d64_env_model_at_import():
         "with torch.no_grad(): m(x, mk)\n"
         "print(json.dumps(fp8.route_stats()['triattn']))"
     )
-    base = {k: v for k, v in os.environ.items() if not k.startswith(("MINIWORLD_FP8", "MINIWORLD_TRIATTN"))}
+    base = {k: v for k, v in os.environ.items() if not k.startswith(("FOLDJET_ENGINE_FP8", "FOLDJET_ENGINE_TRIATTN"))}
 
     def stats(**env):
         out = subprocess.run([sys.executable, "-c", code], env={**base, **env}, capture_output=True, text=True, check=True)
         return json.loads(out.stdout.strip().splitlines()[-1])
 
-    a = stats(MINIWORLD_FP8="safe", MINIWORLD_FP8_MODEL="chai1")
+    a = stats(FOLDJET_ENGINE_FP8="safe", FOLDJET_ENGINE_FP8_MODEL="chai1")
     assert a.get("pv_d64", 0) == 1 and a.get("qk", 0) == 0, a
-    for env in ({"MINIWORLD_FP8": "safe", "MINIWORLD_FP8_MODEL": "af3"}, {"MINIWORLD_FP8": "safe"}, {"MINIWORLD_FP8_MODEL": "chai1"}):
+    for env in ({"FOLDJET_ENGINE_FP8": "safe", "FOLDJET_ENGINE_FP8_MODEL": "af3"}, {"FOLDJET_ENGINE_FP8": "safe"}, {"FOLDJET_ENGINE_FP8_MODEL": "chai1"}):
         st = stats(**env)
         assert st.get("pv_d64", 0) == 0, (env, st)
 
 
 def test_d64_env_model_at_import():
-    """MINIWORLD_FP8=safe MINIWORLD_FP8_MODEL=chai1 (read at import, as on the H100) fires the 64-channel e4m3 core on Chai-1's trunk node at L 256; af3 / no model do not."""
+    """FOLDJET_ENGINE_FP8=safe FOLDJET_ENGINE_FP8_MODEL=chai1 (read at import, as on the H100) fires the 64-channel e4m3 core on Chai-1's trunk node at L 256; af3 / no model do not."""
     import json
     import os
     import subprocess
@@ -584,14 +584,14 @@ def test_d64_env_model_at_import():
         "with torch.no_grad(): m(x, mk)\n"
         "print(json.dumps(fp8.route_stats()['triattn']))"
     )
-    base = {k: v for k, v in os.environ.items() if not k.startswith(("MINIWORLD_FP8", "MINIWORLD_TRIATTN"))}
+    base = {k: v for k, v in os.environ.items() if not k.startswith(("FOLDJET_ENGINE_FP8", "FOLDJET_ENGINE_TRIATTN"))}
 
     def stats(**env):
         out = subprocess.run([sys.executable, "-c", code], env={**base, **env}, capture_output=True, text=True, check=True)
         return json.loads(out.stdout.strip().splitlines()[-1])
 
-    a = stats(MINIWORLD_FP8="safe", MINIWORLD_FP8_MODEL="chai1")
+    a = stats(FOLDJET_ENGINE_FP8="safe", FOLDJET_ENGINE_FP8_MODEL="chai1")
     assert a.get("pv_d64", 0) == 1 and a.get("qk", 0) == 0, a
-    for env in ({"MINIWORLD_FP8": "safe", "MINIWORLD_FP8_MODEL": "af3"}, {"MINIWORLD_FP8": "safe"}, {"MINIWORLD_FP8_MODEL": "chai1"}):
+    for env in ({"FOLDJET_ENGINE_FP8": "safe", "FOLDJET_ENGINE_FP8_MODEL": "af3"}, {"FOLDJET_ENGINE_FP8": "safe"}, {"FOLDJET_ENGINE_FP8_MODEL": "chai1"}):
         st = stats(**env)
         assert st.get("pv_d64", 0) == 0, (env, st)

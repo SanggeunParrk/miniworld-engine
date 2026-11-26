@@ -18,6 +18,6 @@ helper = '''def _ln_fwd(g, x, lnw, lnb, eps, L):
 s = s.replace(anchor, helper + anchor, 1)
 s = s.replace("#: (N1, cuda:b200_sm100 71 / Bidirectional 5) the bias-only paths' LayerNorm backward (C = 128) on the B200 kernel of",
               "#: (N1, cuda:b200_sm100 71 / Bidirectional 5) the bias-only paths' LayerNorm forward and backward (C = 128) on the B200 kernels of")
-s = s.replace("dx bitwise equal, d gamma / d beta fp32 sums regrouped. MINIWORLD_BIDIR_B200_LNBWD=0 turns it off.", "forward y / mean / rstd and dx bitwise equal, d gamma / d beta fp32 sums regrouped. MINIWORLD_BIDIR_B200_LNBWD=0 turns it off.")
+s = s.replace("dx bitwise equal, d gamma / d beta fp32 sums regrouped. FOLDJET_ENGINE_BIDIR_B200_LNBWD=0 turns it off.", "forward y / mean / rstd and dx bitwise equal, d gamma / d beta fp32 sums regrouped. FOLDJET_ENGINE_BIDIR_B200_LNBWD=0 turns it off.")
 open(p, "w").write(s)
 print("ok")

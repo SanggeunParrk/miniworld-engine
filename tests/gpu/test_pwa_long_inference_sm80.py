@@ -1,4 +1,4 @@
-"""``pwa_sm80`` inference past L 2048 on the A100 and the RTX 5090 (FoldForge AF3 n >= 17: L 2176 .. 3200+): ``pair_fwd`` stages the bf16 logits in the output rows when the
+"""``pwa_sm80`` inference past L 2048 on the A100 and the RTX 5090 (FoldJet AF3 n >= 17: L 2176 .. 3200+): ``pair_fwd`` stages the bf16 logits in the output rows when the
 shared-memory row does not fit.  The cuda backend must serve these lengths (no CUDA hole) and match a row-chunked float64 reference as closely as the
 ``pytorch`` backend does (the engine accuracy standard, not bit-identity)."""
 

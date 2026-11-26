@@ -92,7 +92,7 @@ def test_rf3_fp8_capture_takes_the_fp8_route_and_follows_the_length_factor(fp8_c
     mask = torch.ones(1, n, dtype=torch.bool, device="cuda")
     mask[0, n - 37 :] = False
     with torch.no_grad():
-        for _ in range(2):  # FoldForge's _Graph warm-up
+        for _ in range(2):  # FoldJet's _Graph warm-up
             m(x, mask)
         assert len(F8._CACHES) == 1
         F8.GUARD_STATS.update(calls=0, capture_fallbacks=0)

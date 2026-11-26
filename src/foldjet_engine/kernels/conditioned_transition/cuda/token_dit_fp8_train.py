@@ -3,12 +3,12 @@ docs/fp8_training.md "Token DiT").
 
 Enable (environment, read at import; or set :data:`PLACES` / :data:`GRAD_E5M2` at run time)::
 
-    MINIWORLD_FP8_TRAIN=1                        # the training FP8 switch: this block takes RECOMMENDED (unless the variable below is set)
-    MINIWORLD_TOKEN_DIT_FP8_TRAIN=transition     # explicit placements, a comma list of
+    FOLDJET_ENGINE_FP8_TRAIN=1                        # the training FP8 switch: this block takes RECOMMENDED (unless the variable below is set)
+    FOLDJET_ENGINE_TOKEN_DIT_FP8_TRAIN=transition     # explicit placements, a comma list of
                                                  #   forward  expand, squeeze, qkvg, out
                                                  #   dgrad    dexpand (dxt = dab Wab), dsqueeze (dh = dz Wsq), dqkvg (dxa = dqkvg Wqkvg), dout (dog = dy Wo)
                                                  # or a preset: fast (= expand,squeeze), transition, attention, all ("" / 0 / off: none)
-    MINIWORLD_TOKEN_DIT_FP8_TRAIN_GRAD=e4m3      # the 8-bit format of the incoming gradients (dgrad A operands): e4m3 (default) or e5m2
+    FOLDJET_ENGINE_TOKEN_DIT_FP8_TRAIN_GRAD=e4m3      # the 8-bit format of the incoming gradients (dgrad A operands): e4m3 (default) or e5m2
 
 Scales: every activation / gradient operand gets a DYNAMIC per-row (per-token) scale, row max / FMAX, made by the row pass that writes
 it (``token_dit_fp8_train_rows.cu``); the weights a per-channel scale along the GEMM's output columns (made once per weight version,
@@ -21,6 +21,8 @@ unchanged (bit-identical).
 """
 
 from __future__ import annotations
+
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
 
 import functools
 import os
@@ -46,7 +48,7 @@ PRESETS = {
     "fast": frozenset(("expand", "squeeze")),
     "recommended": frozenset(("nox", "hsave")),
 }
-#: what ``MINIWORLD_FP8_TRAIN=1`` turns on for this block (the attention-side projections stay bf16: the inference q|k|v|g placement
+#: what ``FOLDJET_ENGINE_FP8_TRAIN=1`` turns on for this block (the attention-side projections stay bf16: the inference q|k|v|g placement
 #: moved AF3 FoldBench; docs/fp8_training.md)
 RECOMMENDED = frozenset(
     ("nox", "hsave")
@@ -64,15 +66,15 @@ def parse(v: str) -> frozenset[str]:
         elif p in _ALL:
             out.add(p)
         else:
-            raise ValueError(f"MINIWORLD_TOKEN_DIT_FP8_TRAIN: unknown placement {p!r} (use {', '.join(_ALL)} or {', '.join(PRESETS)})")
+            raise ValueError(f"FOLDJET_ENGINE_TOKEN_DIT_FP8_TRAIN: unknown placement {p!r} (use {', '.join(_ALL)} or {', '.join(PRESETS)})")
     return frozenset(out)
 
 
 def _from_env() -> frozenset[str]:
-    own = os.environ.get("MINIWORLD_TOKEN_DIT_FP8_TRAIN")
+    own = os.environ.get("FOLDJET_ENGINE_TOKEN_DIT_FP8_TRAIN")
     if own is not None:
         return parse(own)
-    if os.environ.get("MINIWORLD_FP8_TRAIN", "").strip().lower() in ("1", "on", "true", "safe"):
+    if os.environ.get("FOLDJET_ENGINE_FP8_TRAIN", "").strip().lower() in ("1", "on", "true", "safe"):
         return RECOMMENDED
     return frozenset()
 
@@ -80,16 +82,16 @@ def _from_env() -> frozenset[str]:
 #: the FP8 placements in force (empty: the default bf16 route)
 PLACES: frozenset[str] = _from_env()
 #: incoming gradients (the dgrad A operands) as e5m2 instead of e4m3
-GRAD_E5M2: bool = os.environ.get("MINIWORLD_TOKEN_DIT_FP8_TRAIN_GRAD", "e4m3").strip().lower() == "e5m2"
-#: the fewest block rows M = A L (after padding) that take the placements; smaller calls keep bf16 (``MINIWORLD_TOKEN_DIT_FP8_TRAIN_MIN_ROWS``).
+GRAD_E5M2: bool = os.environ.get("FOLDJET_ENGINE_TOKEN_DIT_FP8_TRAIN_GRAD", "e4m3").strip().lower() == "e5m2"
+#: the fewest block rows M = A L (after padding) that take the placements; smaller calls keep bf16 (``FOLDJET_ENGINE_TOKEN_DIT_FP8_TRAIN_MIN_ROWS``).
 #: H100, CUDA graph fwd + bwd, 2026-11-18: `fast` won at M 18432 / 36864 (-2.2 / -1.1 % cool), was within the same-cubin control at
 #: 3072 .. 12288
-MIN_ROWS: int = int(os.environ.get("MINIWORLD_TOKEN_DIT_FP8_TRAIN_MIN_ROWS", "16384"))
+MIN_ROWS: int = int(os.environ.get("FOLDJET_ENGINE_TOKEN_DIT_FP8_TRAIN_MIN_ROWS", "16384"))
 #: release candidate: the bit-identical byte reductions (no FP8) are part of the DEFAULT H100 bf16 training block ("nox": no fp32 copy of the input, "hsave":
-#: the forward keeps h); MINIWORLD_TOKEN_DIT_TRAIN_BYTES=0 restores the 3.0.1 route (bit-identical outputs and gradients either way)
-DEFAULT_BYTES: frozenset[str] = frozenset() if os.environ.get("MINIWORLD_TOKEN_DIT_TRAIN_BYTES", "1") == "0" else frozenset(("nox", "hsave"))
+#: the forward keeps h); FOLDJET_ENGINE_TOKEN_DIT_TRAIN_BYTES=0 restores the 3.0.1 route (bit-identical outputs and gradients either way)
+DEFAULT_BYTES: frozenset[str] = frozenset() if os.environ.get("FOLDJET_ENGINE_TOKEN_DIT_TRAIN_BYTES", "1") == "0" else frozenset(("nox", "hsave"))
 #: round 4: ``res_adaln_b`` writes the e4m3 xt itself (``res_adaln_b_q8``) instead of a q8 pass over xt (the same 8-bit operands)
-FUSE_Q8: bool = os.environ.get("MINIWORLD_TOKEN_DIT_FP8_TRAIN_FUSE_Q8", "1") != "0"
+FUSE_Q8: bool = os.environ.get("FOLDJET_ENGINE_TOKEN_DIT_FP8_TRAIN_FUSE_Q8", "1") != "0"
 
 
 @functools.lru_cache(maxsize=None)
@@ -182,7 +184,7 @@ def mm(a8: torch.Tensor, sa: torch.Tensor, w: tuple[torch.Tensor, torch.Tensor],
     return out
 
 
-_DEBUG = os.environ.get("MINIWORLD_FP8_TRAIN_DEBUG", "") == "1"
+_DEBUG = os.environ.get("FOLDJET_ENGINE_FP8_TRAIN_DEBUG", "") == "1"
 _SEEN = [0]
 
 

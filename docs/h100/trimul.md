@@ -198,7 +198,7 @@ tables back; same-route control captured separately; cool = median of 6 rounds a
 incoming L768 0.97, D64 / D128 L1024-1536 0.98, D64 hidden 128 L2048 0.98; worst ui D64 L256 1.014 (control 1.011) and ui D64 L1536 1.015
 cool / 0.986 sustained.
 
-Port K3, the default since 2.5.12 (`h100_inference.PORT_K3`, `MINIWORLD_TRIMUL_BIDIR_PORT_K3=0` switches it off; D128 inference, L >= 160): the packaged K1 in its save-statistics l2 form (planes unchanged), the contractions, the port K3 (`h100_b200style.rowpad_k3`). Not bit-identical (bf16 ulps). Error against an fp64 reference (same bf16 weights): rms 3.82e-3 against 4.12e-3 of the packaged K3 (-7.4 %) on random inputs at every length / mask / B = 2 case measured (36 cases), max error lower in 32 of 36 and higher in 4 (L160 tail, L300 tail, L384 none and ones: +3 .. +14 %), real activation inputs equal (output rounding bound: 6.83e-2 / 6.84e-2, 7.14e-2 / 7.14e-2, 1.289e-1 / 1.289e-1). Module graph replay on top of the table: K3 stage -8 % (L1024) .. -15 % (L2048), module 0.963 of the default (mean over L = 128..2048 step 32; 0.977 / 0.985 / 0.976 / 0.977 at L256 / 512 / 1024 / 2048 against the table-less route in a separate run). D64 measured no gain (its K3 is already the port's) and is not served; L < 160 loses the fold launch (2 us).
+Port K3, the default since 2.5.12 (`h100_inference.PORT_K3`, `FOLDJET_ENGINE_TRIMUL_BIDIR_PORT_K3=0` switches it off; D128 inference, L >= 160): the packaged K1 in its save-statistics l2 form (planes unchanged), the contractions, the port K3 (`h100_b200style.rowpad_k3`). Not bit-identical (bf16 ulps). Error against an fp64 reference (same bf16 weights): rms 3.82e-3 against 4.12e-3 of the packaged K3 (-7.4 %) on random inputs at every length / mask / B = 2 case measured (36 cases), max error lower in 32 of 36 and higher in 4 (L160 tail, L300 tail, L384 none and ones: +3 .. +14 %), real activation inputs equal (output rounding bound: 6.83e-2 / 6.84e-2, 7.14e-2 / 7.14e-2, 1.289e-1 / 1.289e-1). Module graph replay on top of the table: K3 stage -8 % (L1024) .. -15 % (L2048), module 0.963 of the default (mean over L = 128..2048 step 32; 0.977 / 0.985 / 0.976 / 0.977 at L256 / 512 / 1024 / 2048 against the table-less route in a separate run). D64 measured no gain (its K3 is already the port's) and is not served; L < 160 loses the fold launch (2 us).
 
 Engine accuracy standard (measure/accuracy.py, registry row 95 = D128, every length, eval + train, port K3 on vs off; 2026-11-16): no light changes (eval L128-768 GREEN with it on and off; training is not on the route: its records are the same, 10 GREEN and the 2 YELLOW gradients of before). Eval max error / tol 8e-3 off -> on: L256 4.65e-3 -> 4.28e-3, L384 4.83e-3 -> 4.94e-3, L512 4.65e-3 -> 4.94e-3, L640 4.94e-3 -> 4.58e-3, L768 5.03e-3 -> 4.76e-3 (L128: below the minimum length, same route). Rows of the other widths do not reach it (D128 only). `BidirectionalTriangleMultiplication.backend_versions["cuda:h100_sm90"]` 6.
 
@@ -309,7 +309,7 @@ history.
 ## Experimental: e4m3 planes between K1 and the contraction (opt-in, off by default)
 
 `kernels/trimul_inproj/cuda/h100_b200style_fp8.py`, `_h100_fp8.py` (2026-11-14, branch `fp8-trimul-fwd`). Single direction, one sample, D128 / D256
-(hidden = pair), bf16 inference, capability (9, 0). Nothing runs unless `h100_b200style_fp8.POLICY` (env `MINIWORLD_TRIMUL_FP8`) is set, so every
+(hidden = pair), bf16 inference, capability (9, 0). Nothing runs unless `h100_b200style_fp8.POLICY` (env `FOLDJET_ENGINE_TRIMUL_FP8`) is set, so every
 default route (and every token / judge result) is unchanged.
 
 - K1 (`h100_b200style_direct.front(qinv=...)`, `tmn_kernels.cuh` `TMN_K1_F8`): the n128 blocks (D128 takes the `(2, 64, 6, 1, 1, 6, 128)` tile in this mode),
@@ -325,9 +325,9 @@ default route (and every token / judge result) is unchanged.
 
 | env (read at import) | effect |
 |---|---|
-| `MINIWORLD_TRIMUL_FP8=calib` + `MINIWORLD_TRIMUL_FP8_GUARD=lazy` | e4m3 planes (bf16-compute K1), cuBLASLt e4m3 contraction, static calibrated scales, lazy overflow guard (graph-capturable) |
-| `MINIWORLD_TRIMUL_FP8_FASTACC=1` | cuBLASLt fast accumulation of the e4m3 contraction: 1.07-1.08x of the contraction at L>=1024, module output moves by < 0.1 % of the update (the error of the route is unchanged to 4 digits on real Protenix dumps) |
-| `MINIWORLD_TRIMUL_FP8_K1=1` | the K1 projections themselves in e4m3 (EXPERIMENTAL: update error 6.9 % vs 3.8 % for planes only; FAILED the Protenix n=12 trunk-seed pLDDT criterion: never a default) |
+| `FOLDJET_ENGINE_TRIMUL_FP8=calib` + `FOLDJET_ENGINE_TRIMUL_FP8_GUARD=lazy` | e4m3 planes (bf16-compute K1), cuBLASLt e4m3 contraction, static calibrated scales, lazy overflow guard (graph-capturable) |
+| `FOLDJET_ENGINE_TRIMUL_FP8_FASTACC=1` | cuBLASLt fast accumulation of the e4m3 contraction: 1.07-1.08x of the contraction at L>=1024, module output moves by < 0.1 % of the update (the error of the route is unchanged to 4 digits on real Protenix dumps) |
+| `FOLDJET_ENGINE_TRIMUL_FP8_K1=1` | the K1 projections themselves in e4m3 (EXPERIMENTAL: update error 6.9 % vs 3.8 % for planes only; FAILED the Protenix n=12 trunk-seed pLDDT criterion: never a default) |
 
 D128 FP8 planes now use the three-warpgroup K1 tile `(3, 64, 6, 1, 1, 6, 128)` (24 KB ring slots; bf16 weights in z-chunk-sized slots, one `[64 k][128 rows]` TMA load per slot):
 K1 0.84-0.90x of the two-warpgroup tile, planes bit-identical. D256 cannot take it (the ring would need 8 slots x 24 KB). D64 is not covered (the n128 ring K1 does not run at D64).
@@ -338,7 +338,7 @@ default heuristic pick (1.29 PFLOPs = 65 % of the dense e4m3 peak), so the contr
 
 - Incoming: K1 reads the pair through the transposed map and now stores the LN_in statistics at the swapped pair token itself (`K1Params.stats_t`, a field in the padding after `rows`, read only in `TMN_K1_F8` builds), so K3 reads them directly: the host transpose of `xs` (4 host ops + one elementwise kernel, 3-14 us) is gone.
   The amax buffer is allocated once per module (it was a `torch.zeros(1)` per call through `setdefault`). Output bytes unchanged.
-- Min-L gates (`MIN_L`, `MINIWORLD_TRIMUL_FP8_MINL`): D128 out 144, D128 in 192, D256 out 224, D256 in 144, bidirectional D128 256, bidirectional D256 1024; below them the bf16 route runs unchanged.
+- Min-L gates (`MIN_L`, `FOLDJET_ENGINE_TRIMUL_FP8_MINL`): D128 out 144, D128 in 192, D256 out 224, D256 in 144, bidirectional D128 256, bidirectional D256 1024; below them the bf16 route runs unchanged.
 - Bidirectional block (2026-11-16, `fp8/bidir-tm`): `h100_b200style_fp8.run(direction=0)` runs the two directions as two single-direction FP8 K1 + e4m3 contractions into one `tri` and one K3 over 2 d channels (`K3_CSCALE=1`); numbers and the audit of the default bidirectional routes in `docs/fp8.md` and "Bidirectional inference" above.
 - Prebuild: the FP8 K1 tile(s) and the `K3_CSCALE` K3 (row form; D256 also the token-flat form) are in the sm90 plan (`kernels/trimul_inproj/cuda/__init__.py`); an FP8 forward against a prebuilt bundle and an empty JIT cache compiles nothing.
 - Measured (graph replay, module, vs the 2.5.9 default): D128 -9 .. -25 % (L256 .. L2048), D256 -4 .. -16 %. The contraction is a serial stage (removing the cuBLAS call removes exactly its time); the K1 overflow guard costs < 1 % (K1 with the amax pointer removed);

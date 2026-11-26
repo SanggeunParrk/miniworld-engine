@@ -1,5 +1,5 @@
 """Default-route (FP8 off) bytes of the pair modules with a 5090 e4m3 route (TriMul, TriAttn, Transition): sha256 of eager, of a CUDA-graph replay and of
-eager after the capture, one line per case. Run once per tree (PYTHONPATH = that tree's src, every MINIWORLD_*FP8* variable unset) and compare the outputs.
+eager after the capture, one line per case. Run once per tree (PYTHONPATH = that tree's src, every FOLDJET_ENGINE_*FP8* variable unset) and compare the outputs.
 
     python pair_default_bytes.py [case ...]      # case = trimul:D:kind:L (kind 0 bidir / 1 out / 2 in), triattn:D:H:L, transition:D:n:rows
 """
@@ -10,7 +10,7 @@ import sys
 
 import torch
 
-assert not any("FP8" in k for k in os.environ if k.startswith("MINIWORLD")), "unset every MINIWORLD_*FP8* variable"
+assert not any("FP8" in k for k in os.environ if k.startswith("MINIWORLD")), "unset every FOLDJET_ENGINE_*FP8* variable"
 
 CASES = [
     "trimul:128:1:256", "trimul:128:2:512", "trimulrf3:128:1:256", "trimulrf3:128:2:384", "trimul:512:1:256", "trimul:64:2:384", "trimul:64:0:256", "trimul:128:0:384", "trimul:256:1:384", "trimul:384:2:256", "trimul:64:1:256",

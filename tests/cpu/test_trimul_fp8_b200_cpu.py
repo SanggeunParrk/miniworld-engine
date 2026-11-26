@@ -10,7 +10,7 @@ from foldjet_engine.kernels.trimul_inproj.cuda import b200_fp8 as F8
 
 
 def test_off_by_default():
-    if "MINIWORLD_TRIMUL_FP8" in os.environ or "MINIWORLD_FP8" in os.environ:
+    if "FOLDJET_ENGINE_TRIMUL_FP8" in os.environ or "FOLDJET_ENGINE_FP8" in os.environ:
         pytest.skip("an FP8 switch is set in the environment")
     assert F8.POLICY is None
 

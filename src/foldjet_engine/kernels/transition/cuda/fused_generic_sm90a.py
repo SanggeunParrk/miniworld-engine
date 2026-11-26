@@ -516,7 +516,7 @@ def transition_generic_sm90a(x, gamma, beta, wa, wb, ws, eps):
     off, or nothing requiring grad) runs the forward without the saves."""
     if not (torch.is_grad_enabled() and any(t.requires_grad for t in (x, gamma, beta, wa, wb, ws))):
         shape = x.shape
-        # fp32 masters under bf16 activations: cast once per parameter version, not per call (FoldForge: ~1200 copy launches per OpenDDE
+        # fp32 masters under bf16 activations: cast once per parameter version, not per call (FoldJet: ~1200 copy launches per OpenDDE
         # fold); fp32: the launch rounds them once per parameter version (_weights.tf32_rounded_triple)
         from foldjet_engine.kernels import _capture
 

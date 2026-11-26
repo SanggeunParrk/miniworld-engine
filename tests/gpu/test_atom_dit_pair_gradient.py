@@ -1,12 +1,12 @@
-"""R16 (FoldForge): the atom-DiT block sends a gradient into its atom-pair (pair-bias) input on every backend that serves training, the
+"""R16 (FoldJet): the atom-DiT block sends a gradient into its atom-pair (pair-bias) input on every backend that serves training, the
 same as the ``pytorch`` reference's (H100: kernels/integrations/local_dit_h100; A100: the sm_80 block / kernels/dit_variants; triton).
 
-FoldForge's Protenix v1 parameters that get no gradient (``single_to_pair_cond_row`` / ``_col``, ``embed_pair_offsets``,
+FoldJet's Protenix v1 parameters that get no gradient (``single_to_pair_cond_row`` / ``_col``, ``embed_pair_offsets``,
 ``embed_pair_distances`` of the input embedder and the diffusion encoder, without the ``_1`` suffix) are not upstream of the engine block:
 its ``AtomCrossAttEncoder.prepare`` discards the pair that ``_per_atom_conditioning`` builds from them (``token_atoms_single_cond, _ =``),
 as AF3's release does; they get None on the ``pytorch`` backend too.
 
-FoldForge's pattern: 610 real atoms of 1024, the output masked to the real atoms (``_mask_atoms``), so the upstream gradient is zero on
+FoldJet's pattern: 610 real atoms of 1024, the output masked to the real atoms (``_mask_atoms``), so the upstream gradient is zero on
 the padding rows. ``test_padding_windows_past_the_last_real_one``: the same with an upstream gradient on every row, so the query windows
 wholly past the last real atom (padding queries only) count too."""
 

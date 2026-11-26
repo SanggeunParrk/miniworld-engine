@@ -56,7 +56,7 @@ def _opm_outputs(length: int, depth: int, padded: bool, probe: str, monkeypatch)
     from foldjet_engine.modules.msa import OuterProductMean
     from foldjet_engine.modules.primitives import unpadded_masks
 
-    monkeypatch.setenv("MINIWORLD_OPM_PROBE", probe)
+    monkeypatch.setenv("FOLDJET_ENGINE_OPM_PROBE", probe)
     ogemm_sm80._PROBES.clear()
     torch.manual_seed(0)
     m = OuterProductMean(d_msa=64, d_pair=128, d_hidden=32, normalize_before_proj=True).cuda().to(torch.bfloat16)

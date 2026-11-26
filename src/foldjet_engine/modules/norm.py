@@ -574,7 +574,7 @@ class IdentityAdaptiveLayerNorm(BackendModule):
 
         out = (1 + W_s cond) * LN(x) + W_b cond
 
-    ``LN`` has no affine (``ln_in``, as :class:`AdaptiveLayerNorm`'s) and the epsilon ``eps`` (Chai-1's release: 0.1; FoldForge's fast
+    ``LN`` has no affine (``ln_in``, as :class:`AdaptiveLayerNorm`'s) and the epsilon ``eps`` (Chai-1's release: 0.1; FoldJet's fast
     mode: 1e-5); ``to_scale`` / ``to_bias`` are bias-free and zero-initialised (the identity). A part of the Chai-1 DiT blocks, not a
     requirements module of its own.
     """

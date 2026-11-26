@@ -9,6 +9,8 @@ head-major (a fused WMMA LayerNorm + projection kernel measured 3.4-3.6x slower 
 
 from __future__ import annotations
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
+
 import functools
 import os
 from pathlib import Path
@@ -232,7 +234,7 @@ def _cond_fold_pack(w1, b1, w2, b2):
 
 
 #: The folded conditioning GEMMs of a stack, grouped and off the blocks' critical path. A stack's blocks read the SAME conditioning
-#: tensor (one sampler step: FoldForge's and the engine's TokenDiTStack pass one object to every block), and a block's conditioning
+#: tensor (one sampler step: FoldJet's and the engine's TokenDiTStack pass one object to every block), and a block's conditioning
 #: GEMM reads nothing else. So:
 #:   - the blocks that read one conditioning are learned in call order (per first block: ``_COND_GROUPS``, the last pass's sequence);
 #:   - a block whose successors are known issues ONE GEMM for the next chunk of them ([P, d_cond] x [d_cond, n 6 D]: the stack-level
@@ -243,7 +245,7 @@ def _cond_fold_pack(w1, b1, w2, b2):
 #:     its own GEMM on the side stream from the start of the previous block that read this conditioning.
 #: Per (capture, stream, conditioning tensor) entry (``_COND_PIPE``): the pass's sequence, the chunks issued for later positions, the
 #: last block's start event. Capture-scoped by the capture's own id, whatever is declared static: a sampler step's conditioning changes
-#: between replays (FoldForge makes it inside the captured denoiser step), so nothing made from it outlives a capture or a replay -- only
+#: between replays (FoldJet makes it inside the captured denoiser step), so nothing made from it outlives a capture or a replay -- only
 #: the ORDER and the grouping of the GEMMs change, never what a block computes (a chunk's columns are the block's own [W1; W2] rows, a
 #: block's key is checked before it is served).
 #:
@@ -371,34 +373,34 @@ _STATIC_PACKS: dict = _capture.weight_cache(
 )  # the weight packs of the blocks with model options (``token_inference``)
 _NO_GATE = 1.0e4  # gate logits of a block without a gating query: sigmoid(1e4) == 1.0 in fp32
 #: B200 bf16 inference with B trunk_seeds: every fold in one core launch (0: one launch per fold)
-_B200_FOLDS = os.environ.get("MINIWORLD_TOKEN_B200_FOLDS", "1") != "0"
+_B200_FOLDS = os.environ.get("FOLDJET_ENGINE_TOKEN_B200_FOLDS", "1") != "0"
 #: B200 bf16 inference: the pair pass on a side stream too, issued after the folded conditioning GEMM (part 3: 1-8 % faster at L 128 -
 #: 512; part 2 had measured the fork 1-10 % slower with the pair pass issued first, where it held the SMs the chain needed).
-#: OFF by default since 2026-11-24 (MINIWORLD_TOKEN_B200_BF16_FORK=1 turns it on): with several shapes' sampler graphs alive in one process
-#: (FoldForge's per-shape sampler-graph cache, F4) the bf16 fork gave non-finite coordinates (AF3 12 FoldBench targets in one process: 1 of 12,
+#: OFF by default since 2026-11-24 (FOLDJET_ENGINE_TOKEN_B200_BF16_FORK=1 turns it on): with several shapes' sampler graphs alive in one process
+#: (FoldJet's per-shape sampler-graph cache, F4) the bf16 fork gave non-finite coordinates (AF3 12 FoldBench targets in one process: 1 of 12,
 #: 27 targets: 9 of 27); with the fork off 12 / 12 finite. Recording the side-stream outputs on the caller's stream did not fix it: cause open.
-_B200_BF16_FORK = os.environ.get("MINIWORLD_TOKEN_B200_BF16_FORK", "0") == "1"
+_B200_BF16_FORK = os.environ.get("FOLDJET_ENGINE_TOKEN_B200_BF16_FORK", "0") == "1"
 #: B200 fp32 inference inside a capture, one sample: the v^T GEMM on the chain (0: beside it)
-_B200_VT_MAIN = os.environ.get("MINIWORLD_TOKEN_B200_VT_MAIN", "1") != "0"
+_B200_VT_MAIN = os.environ.get("FOLDJET_ENGINE_TOKEN_B200_VT_MAIN", "1") != "0"
 #: B200 fp32 inference inside a capture, several samples (round 3 part 6, measured per row): v^T on the chain at L 128 when the
 #: conditioning is shared by the samples or there is no gating query (the chain to the core is short there: the side stream's pair pass
 #: + v^T were the longer path; Chai-1 r110 / r111 96.1 -> 94.1 us, shared-cond rows 2-11 % faster; per-sample rows with a gate 2-9 %
 #: slower, left beside); on a stream of its own at L 256 with a shared conditioning (beside the q | k rows and the pair pass:
 #: Boltz-2 r183 132.8 -> 126.9 us). 0: v^T beside the chain as before
-_B200_VT_RULE = os.environ.get("MINIWORLD_TOKEN_B200_VT_RULE", "1") != "0"
+_B200_VT_RULE = os.environ.get("FOLDJET_ENGINE_TOKEN_B200_VT_RULE", "1") != "0"
 #: B200 fp32 inference without a gating query (Chai-1): the gate columns from the q | k | g GEMM (zero rows, bias +1e4; 0: fill + a q | k GEMM)
-_B200_NOGATE_GEMM = os.environ.get("MINIWORLD_TOKEN_B200_NOGATE_GEMM", "1") != "0"
+_B200_NOGATE_GEMM = os.environ.get("FOLDJET_ENGINE_TOKEN_B200_NOGATE_GEMM", "1") != "0"
 #: B200 fp32: the pair -> bias pass and the v^T GEMM of a captured inference step as a parallel branch of the graph, joined before the
-#: core (``bias_only_dit.cuda.side``; MINIWORLD_TOKEN_B200_STREAMS=0: one chain). The pair pass is the largest stage of a step whose
+#: core (``bias_only_dit.cuda.side``; FOLDJET_ENGINE_TOKEN_B200_STREAMS=0: one chain). The pair pass is the largest stage of a step whose
 #: bias is rebuilt per replay (36 of 213 us at L 768 bf16, 115 of 372 us fp32) and reads nothing of the conditioning / single chain.
-_B200_STREAMS = os.environ.get("MINIWORLD_TOKEN_B200_STREAMS", "1") != "0"
+_B200_STREAMS = os.environ.get("FOLDJET_ENGINE_TOKEN_B200_STREAMS", "1") != "0"
 #: B200 fp32 inference, several samples: one q | k | v | g GEMM, v read MN-major by the core (``-DVMN``; 0: the v^T GEMM)
-_B200_VMN = os.environ.get("MINIWORLD_TOKEN_B200_VMN", "1") != "0"
+_B200_VMN = os.environ.get("FOLDJET_ENGINE_TOKEN_B200_VMN", "1") != "0"
 #: B200 parallel blocks inside a capture: the transition on its own stream beside the attention (0: on the chain after it)
-_B200_PAR = os.environ.get("MINIWORLD_TOKEN_B200_PAR", "1") != "0"
+_B200_PAR = os.environ.get("FOLDJET_ENGINE_TOKEN_B200_PAR", "1") != "0"
 #: B200 fp32 inference, several samples (part 9): the CTA-pair TF32 GEMMs (``pair32``) for q | k | v | g with the TF32 rounding of q | k | v in
 #: the epilogue, the out projection and the up-gate expand with the SwiGLU epilogue (0: cuBLAS + the row passes)
-_B200_PAIR32 = int(os.environ.get("MINIWORLD_TOKEN_B200_PAIR32", "5"))  # bits: 1 q | k | v | g, 2 out projection, 4 expand
+_B200_PAIR32 = int(os.environ.get("FOLDJET_ENGINE_TOKEN_B200_PAIR32", "5"))  # bits: 1 q | k | v | g, 2 out projection, 4 expand
 
 
 def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=None, variant=None):
@@ -790,7 +792,7 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
         _fp8.active(
             M, D, fp32, (plain or v == VARIANT_UP) and fold, identity and fold, parallel and fold and not up and not identity, up, b200
         )
-        if _fp8.PLACES  # (B200: the tcgen05 e4m3 expand of token_dit_fp8_b200, expand only unless MINIWORLD_TOKEN_DIT_FP8_B200 says more)
+        if _fp8.PLACES  # (B200: the tcgen05 e4m3 expand of token_dit_fp8_b200, expand only unless FOLDJET_ENGINE_TOKEN_DIT_FP8_B200 says more)
         else frozenset()
     )
     if _fp8.PLACES:  # observability only (fp8.route_stats()): plain int bumps at call time

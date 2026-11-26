@@ -20,6 +20,7 @@ gradients from two GEMMs over the tokens (``G = D^T [xh | 1 ...]``) and one fina
 Ampere-only and shape-gated by construction: ``supports()`` is the whole gate; everything it rejects keeps the module's Triton path.
 """
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
 import functools
 import math
 import os
@@ -230,7 +231,7 @@ def _bare_front(x: torch.Tensor, d: int, save: bool, length: int, variant: bool 
     falls to a 32 x 32 wmma tile (T = 16384, N = 1032: 100 against 147 us).  The variants (Chai1 and its confidence head, RoseTTAFold3) take it at every
     length (interleaved A-B-A-B, CUDA graph, L2 flushed: 16-23 % faster at L 128 and 384 .. 1024, equal at L 256); the d_pair-256 rows engine from L 256 on
     keeps its padded layouts (``padding`` below: those lengths were tuned and are 3-26 % faster than the bare form)."""
-    mode = os.environ.get("MINIWORLD_TRIATTN_BARE", "auto")
+    mode = os.environ.get("FOLDJET_ENGINE_TRIATTN_BARE", "auto")
     if mode == "0" or save or d != 256 or not _arch.on_sm120(x):
         return False
     return mode == "1" or variant or length < 256
@@ -242,7 +243,7 @@ def _split_front(x: torch.Tensor, d: int, save: bool, dhp: int, h: int, hd: int)
     64 x 64 tile at 72 TFLOP/s; N = 512 at K = 128 reaches 125 (L 640: 807 us against 493 + 84 us); the shift and the gate bias are the GEMM biases (bf16, one rounding
     with the projection)."""
     return (
-        not save and (d, dhp, h, hd) == (128, 128, 4, 32) and os.environ.get("MINIWORLD_TRIATTN_SPLIT", "auto") != "0" and _arch.on_sm120(x)
+        not save and (d, dhp, h, hd) == (128, 128, 4, 32) and os.environ.get("FOLDJET_ENGINE_TRIATTN_SPLIT", "auto") != "0" and _arch.on_sm120(x)
     )
 
 
@@ -940,7 +941,7 @@ def forward(
 
 # ---------------------------------------------------------------------------------------------------------------------- row-blocked inference
 #: An inference call of the rows engine runs ``forward_rows`` when L is not a multiple of 128 or the whole-pair front output ``[T, 4 H 32 + Hpad]``
-#: would exceed this (FoldForge OpenDDE's structural-token refiner: d_pair 384 x 12 heads at 3968 tokens, 46 GiB); requirement sizes up to L2048
+#: would exceed this (FoldJet OpenDDE's structural-token refiner: d_pair 384 x 12 heads at 3968 tokens, 46 GiB); requirement sizes up to L2048
 #: (12 GiB at d_pair 384) keep the whole-pair call.
 ROWS_BLOCKED_BYTES = 16 << 30
 #: The pair rows of one block of ``forward_rows``: about this many bytes of front output per block.
@@ -1566,7 +1567,7 @@ def variant_forward_ops(
         and not save
         and not bare
         and not split
-        and os.environ.get("MINIWORLD_TRIATTN_BARE", "auto") != "0"
+        and os.environ.get("FOLDJET_ENGINE_TRIATTN_BARE", "auto") != "0"
         and _arch.on_sm120(x)
     )
 

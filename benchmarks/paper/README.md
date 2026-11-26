@@ -36,7 +36,7 @@ Each folder has `README.md` (what, conditions, commands, output), config `*.yaml
 
 **Iteration note (methodology).** The kernel timing was changed from 100 to 20 iterations (commit d9e8a3105) while the campaigns were running; nothing was re-measured because of it. B200 E1 and E5 were measured at 20 iterations. H100 E1-E4 and E6 were measured at 100 iterations (before the change); E5 (all cards) was measured at 20. On A100 and RTX 5090 the records are a mix, because the change landed mid-campaign: E1 (the later passes, and on the 5090 repeat 3) and the A100 kit stage of E2 hold 20-iteration records, the rest (E2 engine, E1 repeat 1 on the 5090, most of E1 on the A100) 100. Every raw record carries its own `iterations`. All reported numbers are medians (of the per-repeat medians), so the iteration count changes the noise of a sample, not its expected value; the 100- and 20-iteration records are not biased against each other and are not corrected or re-measured.
 Anthropic kernels run through each card's kit stack: H100 `third_party/anthropic/kit_stack.sh` (CUDA-13 container; needs `KITS_DIR`, `FF_SCRATCH`,
-`MINIWORLD_ANTHROPIC_ROOT`), A100 `third_party/anthropic/kit_stack_compat.sh` with `MINIWORLD_ANTHROPIC_ROOT` = a release root holding the
+`FOLDJET_ENGINE_ANTHROPIC_ROOT`), A100 `third_party/anthropic/kit_stack_compat.sh` with `FOLDJET_ENGINE_ANTHROPIC_ROOT` = a release root holding the
 cu129 / py312 prebuilt (cssb3: `~/w45-jobs/upstream`) and `KIT_COMPAT_DIR` (CUDA-13 compat libcuda, default `~/cuda-compat-13.0`); the RTX 5090
 needs none (driver is CUDA 13). The `pytorch` reference of the `kit` stage is measured in that same process (pairing within a stack).
 

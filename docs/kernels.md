@@ -96,7 +96,7 @@ python -m foldjet_engine.kernels._prebuild [--arch sm90a] [--jobs N] [--only FAM
   Nothing is recorded from a model run.
 - **Explicit arch.** `--arch` (default `sm90a` = H100; `sm80` = A100; `sm120a` = RTX 5090; `sm100a` = B200) picks the variants and the SM
   count (132 / 108 / 170 / 148) some builds specialise for; no device is queried. Builds run with `TORCH_CUDA_ARCH_LIST` set to the target.
-- **Build cache.** Artifacts go to `~/.cache/miniworld_engine_jit` (`$XDG_CACHE_HOME` respected): `torch_extensions/<name>-<key>/` and
+- **Build cache.** Artifacts go to `~/.cache/foldjet_engine_jit` (`$XDG_CACHE_HOME` respected): `torch_extensions/<name>-<key>/` and
   `<family>/<stem>-<key>.cubin`. The key (`_codegraph.py`) is computed from the content each artifact compiles: the entry sources and the
   `#include` closure actually reached (normalised: comments and whitespace do not count), the flags, torch / CUDA / Python versions,
   library versions for CUTLASS / cuBLASDx. It decides only whether an artifact must be (re)built; it is never used to judge a result.

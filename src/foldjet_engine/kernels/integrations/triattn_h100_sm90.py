@@ -229,7 +229,7 @@ def _rows_blocks(kind: int, pair: torch.Tensor, n_head: int) -> int:
         return 1
     blocks = -(-_bytes_per_token(GENERIC, C, n_head, False)[0] * L * L // int(cap))
     if blocks >= 3:
-        # far past the cap (FoldForge OpenDDE's refiner: d_pair 384 at 2976 / 3968 tokens; the requirement sizes up to L2048 take 1 - 2
+        # far past the cap (FoldJet OpenDDE's refiner: d_pair 384 at 2976 / 3968 tokens; the requirement sizes up to L2048 take 1 - 2
         # blocks): blocks of at most ROWS_BLOCK_BYTES of q | k | v | g, so an allocator holding a fragmented model can place them (a 9 GiB
         # block ran out of memory with 26 GiB reserved but free in the n = 16 cell's second fold)
         blocks = max(blocks, -(-L * L * 4 * 32 * n_head * 2 // ROWS_BLOCK_BYTES))
@@ -241,7 +241,7 @@ ROWS_BLOCK_BYTES = 2 << 30
 
 
 @torch.autocast("cuda", enabled=False)  # the fp16 core takes the fp16 projections as made: an enclosing bf16 autocast turned the
-# q | k | v | g GEMM bf16 and the core raised (FoldForge's 5I28 run, OpenDDE at 2048 tokens: the first call split into row blocks)
+# q | k | v | g GEMM bf16 and the core raised (FoldJet's 5I28 run, OpenDDE at 2048 tokens: the first call split into row blocks)
 def _generic_rows(pair, lnw, lnb, wcat, wo_p, n_head, head_dim, mask, eps, trans, out, flip, gate_bias, out_bias, blocks):
     """Inference of one sample at a time in ``blocks`` blocks of its pair rows, on the width-generic kernels (``_rows_blocks``).
 

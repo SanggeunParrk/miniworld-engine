@@ -36,7 +36,7 @@ records that row as `unsupported` (visible in the tokens).
 ## 1. Requirements
 
 `src/foldjet_engine/requirements/`. `requirements_module.csv` has one row per distinct (module class, stream, dims, options) that a
-downstream model constructor builds (FoldForge's AF3-family models and MiniWorld), plus rows the engine keeps itself (`engine-own`).
+downstream model constructor builds (FoldJet's AF3-family models and MiniWorld), plus rows the engine keeps itself (`engine-own`).
 `requirements_kernel.csv` lists every kernel a module backend launches, with its family, its role (`forward`, `forward_infer`,
 `forward_train`, `backward`) and a human-managed `version`. A kernel's range is the union of its module rows, under the derive rule.
 See [requirements.md](requirements.md).
@@ -96,7 +96,7 @@ does not change them to make them pass anything.
 
 CUDA kernels are torch extensions or driver-API cubins, built through `kernels/_nvcc.py` (`load_extension`, `load_inline_extension`,
 `cubin`). The runtime first looks for the prebuilt bundle (`foldjet_engine/_prebuilt/`, installed by the per-arch kernels wheel),
-then for the local JIT cache (`~/.cache/miniworld_engine_jit`). If neither has the artifact, the runtime compiles it. If a build or
+then for the local JIT cache (`~/.cache/foldjet_engine_jit`). If neither has the artifact, the runtime compiles it. If a build or
 load fails, the runtime raises `_nvcc.KernelBuildError`, chained to the original exception. A build failure is never a reason to
 take another path. Support decisions (shape, dtype, arch, a missing toolkit) are made before any build and come back as
 `_supports_cuda` reasons.

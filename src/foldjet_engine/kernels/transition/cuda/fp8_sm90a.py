@@ -1,6 +1,6 @@
 """OPT-IN FP8 (e4m3) inference forward of the Transition on H100, D 128 / 256 / 384 / 512 (engine 3.0.0 line; ``docs/fp8.md``, section Transition).
 
-Off by default: with ``MINIWORLD_TRANSITION_FP8`` unset nothing here runs and every Transition call takes the 2.5.12 route.
+Off by default: with ``FOLDJET_ENGINE_TRANSITION_FP8`` unset nothing here runs and every Transition call takes the 2.5.12 route.
 
 The kernel (``transition_fp8_fwd_sm90a.cu``) is the 2.5.12 D128 inference build (``fused_sm90a``, LNFRAG schedule) with both GEMMs on
 e4m3 wgmma (fp32 accumulation): xn is quantized in registers straight from the fp32 LayerNorm (scale from the LayerNorm bound, cannot
@@ -19,19 +19,21 @@ epilogue straight into the k32 e4m3 A fragment (the D 128 K permutation) and one
 Environment (read at import):
 
 =========================================  ==========================================================================================
-``MINIWORLD_TRANSITION_FP8=calib``         route bf16 inference calls at D 128 / 256 / 384 / 512 (n 2 / 4, rows a multiple of 128) through the FP8 kernels
-``MINIWORLD_TRANSITION_FP8_GUARD``         ``sync`` (default, eager: redo an overflowing call) | ``lazy`` (no host sync; CUDA graphs) | ``off``
-``MINIWORLD_TRANSITION_FP8_HEADROOM``      h scale headroom over the calibration amax (16)
-``MINIWORLD_TRANSITION_FP8_G1``            1 (default): the expand GEMM in e4m3 (xn, Wa, Wb); 0: the bf16 expand (D 128 / 256 / wide)
-``MINIWORLD_TRANSITION_FP8_G2``            1 (default): the squeeze GEMM in e4m3 (h, Ws); 0: the bf16 squeeze (D 128 only)
-``MINIWORLD_TRANSITION_FP8_WIDTHS``        widths routed (``128,256,384,512``)
-``MINIWORLD_TRANSITION_FP8_SIGT``          1 (default): sigmoid by one tanh.approx; 0: the 2.5.12 ex2 + rcp form
-``MINIWORLD_TRANSITION_FP8_SLOTS``         weight-ring slots (4; D 128 and D 256)
-``MINIWORLD_TRANSITION_FP8_MINROWS``       smallest row count routed, every width (default ``ROW_GATE``: 16384 at D 128, 8192 at D 256, 65536 at D 384 / 512)
+``FOLDJET_ENGINE_TRANSITION_FP8=calib``         route bf16 inference calls at D 128 / 256 / 384 / 512 (n 2 / 4, rows a multiple of 128) through the FP8 kernels
+``FOLDJET_ENGINE_TRANSITION_FP8_GUARD``         ``sync`` (default, eager: redo an overflowing call) | ``lazy`` (no host sync; CUDA graphs) | ``off``
+``FOLDJET_ENGINE_TRANSITION_FP8_HEADROOM``      h scale headroom over the calibration amax (16)
+``FOLDJET_ENGINE_TRANSITION_FP8_G1``            1 (default): the expand GEMM in e4m3 (xn, Wa, Wb); 0: the bf16 expand (D 128 / 256 / wide)
+``FOLDJET_ENGINE_TRANSITION_FP8_G2``            1 (default): the squeeze GEMM in e4m3 (h, Ws); 0: the bf16 squeeze (D 128 only)
+``FOLDJET_ENGINE_TRANSITION_FP8_WIDTHS``        widths routed (``128,256,384,512``)
+``FOLDJET_ENGINE_TRANSITION_FP8_SIGT``          1 (default): sigmoid by one tanh.approx; 0: the 2.5.12 ex2 + rcp form
+``FOLDJET_ENGINE_TRANSITION_FP8_SLOTS``         weight-ring slots (4; D 128 and D 256)
+``FOLDJET_ENGINE_TRANSITION_FP8_MINROWS``       smallest row count routed, every width (default ``ROW_GATE``: 16384 at D 128, 8192 at D 256, 65536 at D 384 / 512)
 =========================================  ==========================================================================================
 """
 
 from __future__ import annotations
+
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
 
 import functools
 import math
@@ -49,14 +51,14 @@ from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
 _dir = Path(__file__).parent
 
-POLICY = _fp8_env("MINIWORLD_TRANSITION_FP8") or None  # None = off; "calib" = static h scale calibrated on the first eager call
-GUARD = os.environ.get("MINIWORLD_TRANSITION_FP8_GUARD", "sync")
-HEADROOM = float(os.environ.get("MINIWORLD_TRANSITION_FP8_HEADROOM", "16"))
-G1 = int(os.environ.get("MINIWORLD_TRANSITION_FP8_G1", "1"))
-G2 = int(os.environ.get("MINIWORLD_TRANSITION_FP8_G2", "1"))
-SIGT = int(os.environ.get("MINIWORLD_TRANSITION_FP8_SIGT", "1"))
-SLOTS = int(os.environ.get("MINIWORLD_TRANSITION_FP8_SLOTS", "4"))
-_MINROWS_ENV = os.environ.get("MINIWORLD_TRANSITION_FP8_MINROWS")
+POLICY = _fp8_env("FOLDJET_ENGINE_TRANSITION_FP8") or None  # None = off; "calib" = static h scale calibrated on the first eager call
+GUARD = os.environ.get("FOLDJET_ENGINE_TRANSITION_FP8_GUARD", "sync")
+HEADROOM = float(os.environ.get("FOLDJET_ENGINE_TRANSITION_FP8_HEADROOM", "16"))
+G1 = int(os.environ.get("FOLDJET_ENGINE_TRANSITION_FP8_G1", "1"))
+G2 = int(os.environ.get("FOLDJET_ENGINE_TRANSITION_FP8_G2", "1"))
+SIGT = int(os.environ.get("FOLDJET_ENGINE_TRANSITION_FP8_SIGT", "1"))
+SLOTS = int(os.environ.get("FOLDJET_ENGINE_TRANSITION_FP8_SLOTS", "4"))
+_MINROWS_ENV = os.environ.get("FOLDJET_ENGINE_TRANSITION_FP8_MINROWS")
 MIN_ROWS: int | None = int(_MINROWS_ENV) if _MINROWS_ENV else None  # replaces ROW_GATE for every width when set (0 = no gate)
 #: smallest row count routed per width (below it the 2.5.12 route runs). D 128: L128 = 16384 rows (0.66-0.71 of the default; fewer not measured).
 #: D 256: 8192 rows (0.69-0.70; at 6144 rows 1.09 / 0.99 and at 4096 1.24-1.39: the default runs the generic kernels there and one CTA per
@@ -64,9 +66,9 @@ MIN_ROWS: int | None = int(_MINROWS_ENV) if _MINROWS_ENV else None  # replaces R
 #: rows) is 1.5-3.4x SLOWER on the wide FP8 chain than the default (generic) and cuBLAS e4m3 GEMMs bound any gain there at 0-17 %
 #: (docs/fp8.md), so the gate stays.
 ROW_GATE = {128: 16384, 256: 8192, 384: 65536, 512: 65536}
-ABL = int(os.environ.get("MINIWORLD_TRANSITION_FP8_ABL", "0"))  # timing ablation only (wrong output): 3 no chunk loop, 4 no swiglu math
+ABL = int(os.environ.get("FOLDJET_ENGINE_TRANSITION_FP8_ABL", "0"))  # timing ablation only (wrong output): 3 no chunk loop, 4 no swiglu math
 #: widths with an FP8 build: 128 / 256 (one fused kernel each), 384 / 512 (the wide chain); G1 / G2 pick the e4m3 GEMMs
-WIDTHS = tuple(int(w) for w in os.environ.get("MINIWORLD_TRANSITION_FP8_WIDTHS", "128,256,384,512").split(",") if w)
+WIDTHS = tuple(int(w) for w in os.environ.get("FOLDJET_ENGINE_TRANSITION_FP8_WIDTHS", "128,256,384,512").split(",") if w)
 
 E4M3_MAX = 448.0
 GUARD_STATS = {"calls": 0, "retries": 0, "fallbacks": 0, "capture_fallbacks": 0, "calibrations": 0}

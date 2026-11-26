@@ -8,6 +8,8 @@ block are the H100 ones."""
 
 from __future__ import annotations
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
+
 import functools
 import os
 from pathlib import Path
@@ -16,9 +18,9 @@ import torch
 
 _dir = Path(__file__).parent
 #: extra -D flags of the expand cubin (SIG_TANH (default): tanh.approx sigmoid in the epilogue -- below the e4m3 operand error, -7 % kernel time)
-DEFS = tuple(d for d in os.environ.get("MINIWORLD_TOKEN_DIT_FP8_B200_DEFS", "SIG_TANH").split() if d)
-#: CTAs (2 per tile pair) of the expand grid; None = every SM. MINIWORLD_TOKEN_DIT_FP8_B200_CTAS (experiments: the parallel block runs the transition beside the attention core)
-GRID_CTAS = int(os.environ["MINIWORLD_TOKEN_DIT_FP8_B200_CTAS"]) if os.environ.get("MINIWORLD_TOKEN_DIT_FP8_B200_CTAS") else None
+DEFS = tuple(d for d in os.environ.get("FOLDJET_ENGINE_TOKEN_DIT_FP8_B200_DEFS", "SIG_TANH").split() if d)
+#: CTAs (2 per tile pair) of the expand grid; None = every SM. FOLDJET_ENGINE_TOKEN_DIT_FP8_B200_CTAS (experiments: the parallel block runs the transition beside the attention core)
+GRID_CTAS = int(os.environ["FOLDJET_ENGINE_TOKEN_DIT_FP8_B200_CTAS"]) if os.environ.get("FOLDJET_ENGINE_TOKEN_DIT_FP8_B200_CTAS") else None
 
 
 @functools.lru_cache(maxsize=None)

@@ -1,4 +1,4 @@
-"""sm_80 family (A100 / RTX 5090) one-kernel Transition forward: |x| above the f16 range stays finite (FoldForge AF3 5I28 n=1 on the 5090, engine 3.0.5:
+"""sm_80 family (A100 / RTX 5090) one-kernel Transition forward: |x| above the f16 range stays finite (FoldJet AF3 5I28 n=1 on the 5090, engine 3.0.5:
 ``msa_transition`` input with |x| = 65536 gave one -inf, 'non-finite AF3 coordinates').  The f16 squeeze's accumulator starts at the residual x; it now
 carries (x + Ws h) / 16 (``tr_fwd_sm80.cuh`` TR_RESID_SCALE, pack flag bit 30), finite up to |x| ~ 1e6."""
 

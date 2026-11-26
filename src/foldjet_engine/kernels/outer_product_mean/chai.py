@@ -18,6 +18,7 @@ from pathlib import Path
 
 import torch
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
 from foldjet_engine.kernels._compile import opaque
 
 G, K, P, CM = 8, 8, 512, 64
@@ -287,10 +288,10 @@ def forward(module, msa, mask, token_asym_id=None, residual=None):
     return residual + z if residual is not None and not fuse else z
 
 
-# ---- EXPERIMENTAL e4m3 grouped product (opt-in with ``MINIWORLD_OPM_FP8=bound``, H100 inference; docs/fp8.md "Chai-1 grouped OPM") ----
+# ---- EXPERIMENTAL e4m3 grouped product (opt-in with ``FOLDJET_ENGINE_OPM_FP8=bound``, H100 inference; docs/fp8.md "Chai-1 grouped OPM") ----
 #: the shortest MSA depth S (padded rows of the call) that takes the e4m3 product; below it the bf16 batched GEMM runs unchanged
 # default: never (measured a net loss at every S, docs/fp8.md); 0 = every depth
-F8_MIN_S = int(os.environ.get("MINIWORLD_OPM_FP8_CHAI_MINS", str(1 << 40)))
+F8_MIN_S = int(os.environ.get("FOLDJET_ENGINE_OPM_FP8_CHAI_MINS", str(1 << 40)))
 
 
 @functools.cache

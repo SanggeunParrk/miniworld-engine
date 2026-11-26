@@ -17,11 +17,11 @@ with fp32 logits, whose inference showed no problem with bf16 logits (user exper
 ```python
 block.set_pair_bias_logits("bf16")                 # one TokenDiTMiniWorldBiasOnly (or BiasOnlyAttention); None = follow the process default
 foldjet_engine.bias_logits.set_default("bf16")   # every module that has not set its own; None = back to the environment
-MINIWORLD_BIAS_LOGITS=bf16 python run.py            # environment default, read at every call (fp32 | bf16; empty = unset)
+FOLDJET_ENGINE_BIAS_LOGITS=bf16 python run.py            # environment default, read at every call (fp32 | bf16; empty = unset)
 with foldjet_engine.bias_logits.scope("bf16"): ...
 ```
 
-Precedence: the module's own setting, else `set_default`, else `MINIWORLD_BIAS_LOGITS`, else `"fp32"`.
+Precedence: the module's own setting, else `set_default`, else `FOLDJET_ENGINE_BIAS_LOGITS`, else `"fp32"`.
 
 Rules (`bias_logits.effective`):
 

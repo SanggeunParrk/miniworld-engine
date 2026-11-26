@@ -1,5 +1,5 @@
 """RTX 5090: the e4m3 Transition inference forward (``kernels/transition/cuda/fp8_sm120``, ``fp8.SM120_ROUTES["transition"]``, docs/fp8.md "RTX 5090"): error against the
-float64 module at the level of the H100 e4m3 Transition route (update rms 6.6 %, judge 4.5 % there), switched on by ``MINIWORLD_FP8=safe`` / ``engine-fp8`` exactly as
+float64 module at the level of the H100 e4m3 Transition route (update rms 6.6 %, judge 4.5 % there), switched on by ``FOLDJET_ENGINE_FP8=safe`` / ``engine-fp8`` exactly as
 the H100 route, the guard (sync redo, lazy ``overflow_peak`` / ``rescale_all`` through ``fp8.check``), graph == eager, a capture before calibration runs the default,
 ragged rows, and the default route untouched (bytes) while the switch is off."""
 
@@ -95,8 +95,8 @@ def test_error_vs_fp64(F, d: int, n: int, rows: int) -> None:
 
 def test_safe_preset_leaves_it_off_explicit_variable_turns_it_on(monkeypatch) -> None:
     """RTX 5090: the e4m3 Transition is NOT in the ``safe`` preset / ``engine-fp8`` scope (``fp8.SM120_PRESET_EXCLUDED``; owner decision 2026-11-23,
-    docs/fp8.md "RTX 5090": FoldForge end level 24 / 36 inside with it, 33 / 36 without). ``fp8.enable("safe")`` and the ``engine-fp8`` backend leave it
-    off; with ``MINIWORLD_TRANSITION_FP8=calib`` set explicitly they turn it on; ``status()`` / ``route_stats()`` / ``enable(guard=)`` / ``disable()``
+    docs/fp8.md "RTX 5090": FoldJet end level 24 / 36 inside with it, 33 / 36 without). ``fp8.enable("safe")`` and the ``engine-fp8`` backend leave it
+    off; with ``FOLDJET_ENGINE_TRANSITION_FP8=calib`` set explicitly they turn it on; ``status()`` / ``route_stats()`` / ``enable(guard=)`` / ``disable()``
     act on this module (the slot of ``fp8.SM120_ROUTES``)."""
     _needs_5090()
     from foldjet_engine import fp8
@@ -108,8 +108,8 @@ def test_safe_preset_leaves_it_off_explicit_variable_turns_it_on(monkeypatch) ->
     x = torch.randn(1, 16384, 128, device="cuda").bfloat16()  # above the 12288-row gate
     guard = F.GUARD
     try:
-        monkeypatch.delenv("MINIWORLD_TRANSITION_FP8", raising=False)
-        monkeypatch.delenv("MINIWORLD_TRANSITION_FP8_SM120", raising=False)
+        monkeypatch.delenv("FOLDJET_ENGINE_TRANSITION_FP8", raising=False)
+        monkeypatch.delenv("FOLDJET_ENGINE_TRANSITION_FP8_SM120", raising=False)
         for model in (None, "af3", "boltz2"):
             fp8.enable("safe", model=model)
             assert F.POLICY is None and fp8.status()["transition"] is None, model
@@ -124,7 +124,7 @@ def test_safe_preset_leaves_it_off_explicit_variable_turns_it_on(monkeypatch) ->
         m.set_backend("cuda")
         fp8.disable()
         # the explicit variable: on under safe and inside the engine-fp8 scope
-        monkeypatch.setenv("MINIWORLD_TRANSITION_FP8", "calib")
+        monkeypatch.setenv("FOLDJET_ENGINE_TRANSITION_FP8", "calib")
         fp8.enable("safe", guard="lazy")
         assert F.POLICY == "calib" and fp8.status()["transition"] == "calib"
         assert F.GUARD == "lazy" and fp8.status()["guard"]["transition"] == "lazy"
@@ -143,7 +143,7 @@ def test_safe_preset_leaves_it_off_explicit_variable_turns_it_on(monkeypatch) ->
             m(x)
         assert fp8.route_stats()["transition"]["calls"] >= 1
         assert F.POLICY is None  # the process's switch after the scope
-        monkeypatch.setenv("MINIWORLD_TRANSITION_FP8_SM120", "")  # the alias wins over the generic name
+        monkeypatch.setenv("FOLDJET_ENGINE_TRANSITION_FP8_SM120", "")  # the alias wins over the generic name
         fp8.enable("safe")
         assert F.POLICY is None
     finally:
@@ -157,7 +157,7 @@ def test_disable_turns_it_off(F, monkeypatch) -> None:
 
     fp8.disable()
     assert F.POLICY is None
-    monkeypatch.setenv("MINIWORLD_TRANSITION_FP8", "calib")  # the explicit opt-in (the route is not in safe on the 5090)
+    monkeypatch.setenv("FOLDJET_ENGINE_TRANSITION_FP8", "calib")  # the explicit opt-in (the route is not in safe on the 5090)
     fp8.enable("safe")
     assert F.POLICY == "calib"
     fp8.disable()

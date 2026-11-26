@@ -1,4 +1,4 @@
-"""Bias-only token DiT inference at 1024 < L <= 3072 (FoldForge AF3 n = 9 .. 24: 1152 .. 3072 tokens), bf16 / master / fp32 parameters, on H100, A100
+"""Bias-only token DiT inference at 1024 < L <= 3072 (FoldJet AF3 n = 9 .. 24: 1152 .. 3072 tokens), bf16 / master / fp32 parameters, on H100, A100
 and RTX 5090.  3.0.5 raised ``RuntimeError: softmax_t: L a multiple of 32, at most 1024`` on the H100 for bf16 / master inference there (the fp32-logit hoist
 had moved to ``softmax_t``'s P-only form, which holds 1024 keys): ``softmax_hoist`` takes ``softmax_rows`` past 1024.  A100 / RTX 5090 never called
 ``softmax_t`` in inference (``softmax_rows``), and are pinned here too.  The cuda backend must serve the lengths (no CUDA hole), run both the pair path

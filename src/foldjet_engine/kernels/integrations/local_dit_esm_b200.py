@@ -12,7 +12,7 @@ The row kernels are ``b200_atom``'s ``-DRMS=1`` builds (RMSNorm AdaLNs, tables o
 gates); the attention, the q / k norm + rotary and the position-indexed pair bias are ``b200_atom_local/esm.py``'s. The row kernels take the
 AF3 block's 27 parameter slots (``local_dit_b200.WEIGHTS + CROSS_WEIGHTS``); ESMFold2 has no conditioning LayerNorm and no projection biases
 but the query's, so those slots hold constants (the LN weights 1, the scale biases 1, the gate biases 0); the q / k RMSNorm is affine-free
-(FoldForge ``rope_norm``): its kernel weights are a constant 1 and take no gradient. One fold (B = 1), the rotary tables [1, N, 16].
+(FoldJet ``rope_norm``): its kernel weights are a constant 1 and take no gradient. One fold (B = 1), the rotary tables [1, N, 16].
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ import torch
 import torch.nn.functional as F
 from torch.autograd.function import once_differentiable
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
 from foldjet_engine.kernels import _capture
 from foldjet_engine.kernels._compile import device_constant, opaque
 from foldjet_engine.kernels._device import num_sms
@@ -64,7 +65,7 @@ from foldjet_engine.kernels.integrations.local_dit_b200 import (
     _weights,
 )
 
-RMS_EPS = 1.1920928955078125e-07  # torch.finfo(torch.float32).eps: every RMSNorm of the block (FoldForge's, whatever the dtype)
+RMS_EPS = 1.1920928955078125e-07  # torch.finfo(torch.float32).eps: every RMSNorm of the block (FoldJet's, whatever the dtype)
 _HOIST_COND: dict = _capture.weight_cache("local_dit_esm_b200.hoist_cond")
 _HOIST_BIAS: dict = _capture.weight_cache("local_dit_esm_b200.hoist_bias")
 _ESM_ONES = {

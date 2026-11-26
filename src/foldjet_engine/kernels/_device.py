@@ -29,7 +29,7 @@ def num_sms(device: torch.device | int | str | None = None) -> int:
 
 #: CUDA device index -> compute capability (fixed per device: read once). ``torch.cuda.get_device_capability`` costs ~0.85 us a call
 #: (device-index normalisation, lazy-init checks, the properties object); the per-call backend gates ask it several times a block call --
-#: ~70 000 times a FoldForge AF3 forward of 200 steps (~60 ms on the RTX 5090, where a small target's forward is host-bound).
+#: ~70 000 times a FoldJet AF3 forward of 200 steps (~60 ms on the RTX 5090, where a small target's forward is host-bound).
 _CAPABILITY: dict[int, tuple[int, int]] = {}
 
 

@@ -183,7 +183,7 @@ class BackendModule(nn.Module):
             raise ValueError(f"{type(self).__name__} has no backend {backend!r}{via}; available: {', '.join(self.backends)}")
         self.backend = base
         self.engine_fp8 = fp8_on
-        # engine-fp8 lives on the instance's _forward_cuda, so a runtime that calls `_forward_<backend>` directly (FoldForge's guard) gets it too
+        # engine-fp8 lives on the instance's _forward_cuda, so a runtime that calls `_forward_<backend>` directly (FoldJet's guard) gets it too
         self.__dict__.pop(f"_forward_{_fp8.BASE_BACKEND}", None)
         if fp8_on:
             self.__dict__[f"_forward_{_fp8.BASE_BACKEND}"] = _EngineFP8Forward(self)
@@ -263,7 +263,7 @@ def random_input(shape, *, dtype: torch.dtype, device, generator: torch.Generato
     return (scale * torch.randn(tuple(shape), device=device, generator=generator)).to(dtype)
 
 
-#: Suffix of a requirements stream whose conditioning is shared across the samples (FoldForge's layout): ``make_inputs`` gives ``cond`` as
+#: Suffix of a requirements stream whose conditioning is shared across the samples (FoldJet's layout): ``make_inputs`` gives ``cond`` as
 #: one base tensor ``[1, F, N, d]`` expanded (stride 0) over the S samples, and the measurers keep that input expanded (requirements/README.md).
 SHARED_COND_SUFFIX = "_shared_cond"
 

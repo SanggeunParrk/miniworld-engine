@@ -1,4 +1,4 @@
-"""ESMFold2's AF3-form atom block with the atom pair (``modules.atom_dit.AtomDiTESMFold2Pair``, FoldForge R6) on H100 (sm_90a) and A100
+"""ESMFold2's AF3-form atom block with the atom pair (``modules.atom_dit.AtomDiTESMFold2Pair``, FoldJet R6) on H100 (sm_90a) and A100
 (sm_80): restored from the 2.4.x ``local_dit`` ESMFold2 variant (``LocalDiTBlock(**ESMFOLD2)``, commit 2df9a5a82) onto the 2.5 module.
 
     H100 inference   cond90 (hoisted, -DRMS=1) -> pre90 (RMS) -> qknorm_rope -> pair_bias_esm (hoisted) -> attn_esm -> post90 (RMS)
@@ -13,7 +13,7 @@
 
 The row kernels take the AF3 block's 27 parameters (``local_dit_h100._NAMES``); ESMFold2 has no conditioning LayerNorm and no projection
 biases but the query's, so those slots hold constants: the LN weights 1, the scale biases 1 (the identity-centred scale), the gate biases 0.
-The q / k RMSNorm is affine-free (FoldForge ``rope_norm``): its kernel weights are a constant 1. fp32 activations (fp32 parameters, no
+The q / k RMSNorm is affine-free (FoldJet ``rope_norm``): its kernel weights are a constant 1. fp32 activations (fp32 parameters, no
 autocast) run the TF32 kernels; bf16 activations take bf16 or fp32 (master) parameters. One fold (B = 1), the rotary tables [1, N, 16].
 """
 
@@ -26,6 +26,7 @@ import torch
 import torch.nn.functional as Fn
 from torch.autograd.function import once_differentiable
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
 from foldjet_engine.kernels import _capture
 from foldjet_engine.kernels._compile import opaque
 from foldjet_engine.kernels.integrations import local_dit as _ld
@@ -33,7 +34,7 @@ from foldjet_engine.kernels.integrations import local_dit as _ld
 DS, DC, DP, NH = 128, 128, 16, 4
 ESM_KEYS, ESM_SPAN = 192, 160
 F32, BF = torch.float32, torch.bfloat16
-RMS_EPS = 1.1920928955078125e-07  # torch.finfo(torch.float32).eps: every RMSNorm of the block (FoldForge's, whatever the dtype)
+RMS_EPS = 1.1920928955078125e-07  # torch.finfo(torch.float32).eps: every RMSNorm of the block (FoldJet's, whatever the dtype)
 _HOIST_COND: dict = _capture.weight_cache("local_dit_esm.hoist_cond")
 _HOIST_BIAS: dict = _capture.weight_cache("local_dit_esm.hoist_bias")
 
@@ -370,9 +371,9 @@ def _infer_a100(
     """``_train_fwd`` without what only the backward reads, for an inference call (no autograd): the same kernels in the same order, so the same bits. A sampler calls the block at
     every step: the dtype casts and the packed `[Wa; Wb]` are made once per parameter version (`_capture.param_forms`) instead of 8 copies and 3
     concatenations per call (the saved packs of the backward are not made)."""
-    if os.environ.get("MINIWORLD_ESM_A100_INFER", "1") == "0":  # A / B switch: the training block's forward
+    if os.environ.get("FOLDJET_ENGINE_ESM_A100_INFER", "1") == "0":  # A / B switch: the training block's forward
         return _train_fwd(x, tab, bias2, cos, sin, wq, bq, wk, wv, wg, wo, torch.cat([wa, wb]), wsq, length, tl)[:1]
-    # the opt-in RTX 5090 e4m3 rows (fp8.SM120_ROUTES["atom_dit"], the H100 RMS option's switch MINIWORLD_ATOMDIT_FP8; docs/fp8.md "RTX 5090",
+    # the opt-in RTX 5090 e4m3 rows (fp8.SM120_ROUTES["atom_dit"], the H100 RMS option's switch FOLDJET_ENGINE_ATOMDIT_FP8; docs/fp8.md "RTX 5090",
     # atom DiT): off (the default) or off the 5090, parts() is empty and this block runs below unchanged
     from foldjet_engine.kernels.dit_variants.cuda import atom_fp8_sm120 as _a8
 
@@ -649,6 +650,6 @@ def run_block(module, single, cond, pair, mask=None, rope=None):
         if not (cond.is_contiguous() or _shared(cond)):
             cond = cond.contiguous()
         return _infer_h100(single.contiguous(), cond, pair.contiguous(), mask, _weights(module), cos, sin)
-    if not grad and os.environ.get("MINIWORLD_ESM_A100_HOIST", "1") != "0":  # A100 inference: the conditioning table and the windowed pair bias per fold, not per step
+    if not grad and os.environ.get("FOLDJET_ENGINE_ESM_A100_HOIST", "1") != "0":  # A100 inference: the conditioning table and the windowed pair bias per fold, not per step
         return _infer_a100_hoisted(single.contiguous(), cond, pair.contiguous(), mask, _a100_weights(module), cos, sin)
     return _block(module, single.contiguous(), cond, pair.contiguous(), _ld._keys(mask, n0, n), cos, sin)

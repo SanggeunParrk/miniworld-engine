@@ -752,7 +752,7 @@ def _update_inference_body(module, pair, mask, bidirectional, out):
     )
     # K1 packs the first four matrices with live stride-aware CUDA operations.
     # Preserve native column-major parameters instead of copying them first.
-    # fp32 masters under bf16 activations: the casts are made once per parameter version, not per call (FoldForge: 2712 copy launches
+    # fp32 masters under bf16 activations: the casts are made once per parameter version, not per call (FoldJet: 2712 copy launches
     # per ESMFold2 n = 1 trunk on the d 256 path).
     from foldjet_engine.kernels import _capture
 

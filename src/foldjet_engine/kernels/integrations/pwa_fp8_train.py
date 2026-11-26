@@ -1,6 +1,6 @@
 """EXPERIMENTAL, opt-in (off by default): FP8 GEMMs in the PWA TRAINING step (forward + backward) on H100 (cuBLASLt).
 
-Nothing here runs unless the caller asks for it (``MINIWORLD_PWA_FP8_TRAIN`` / ``MINIWORLD_FP8_TRAIN=1`` / :data:`PLACES`); with it off the
+Nothing here runs unless the caller asks for it (``FOLDJET_ENGINE_PWA_FP8_TRAIN`` / ``FOLDJET_ENGINE_FP8_TRAIN=1`` / :data:`PLACES`); with it off the
 training route is the 2.5.14 one, bit for bit. Not part of the inference ``safe`` preset (``foldjet_engine.fp8``).
 
 Scope: ``pwa_train`` (d_msa 64, 8 heads x 32, any d_pair it serves), sm_90a, batch 1, N a multiple of 128 up to 1024, S even. The route runs
@@ -37,6 +37,7 @@ from typing import cast
 
 import torch
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
 from foldjet_engine.kernels.trimul_inproj.cuda import _h100_fp8 as _F
 
 
@@ -51,27 +52,27 @@ def _places(v: str | None) -> frozenset[str]:
     out = frozenset(p.strip() for p in v.split(",") if p.strip())
     bad = out - {"fwd", "dv", "dw"}
     if bad:
-        raise ValueError(f"MINIWORLD_PWA_FP8_TRAIN: unknown placement(s) {sorted(bad)} (use fwd, dv, dw, or 1 for all)")
+        raise ValueError(f"FOLDJET_ENGINE_PWA_FP8_TRAIN: unknown placement(s) {sorted(bad)} (use fwd, dv, dw, or 1 for all)")
     return out
 
 
 #: FP8 placements in the training step ({"fwd", "dv", "dw"}); empty = off (the default route)
-PLACES: frozenset[str] = _places(os.environ.get("MINIWORLD_PWA_FP8_TRAIN", "all" if os.environ.get("MINIWORLD_FP8_TRAIN") == "1" else ""))
+PLACES: frozenset[str] = _places(os.environ.get("FOLDJET_ENGINE_PWA_FP8_TRAIN", "all" if os.environ.get("FOLDJET_ENGINE_FP8_TRAIN") == "1" else ""))
 #: incoming-gradient (do) format: "e4m3" (default: 1.5-2x smaller gradient error than e5m2 at the same speed; the delayed scale keeps it in
 #: range, overflow 0 in every measured run) or "e5m2"
-DO_FMT = os.environ.get("MINIWORLD_PWA_FP8_TRAIN_DO", "e4m3")
+DO_FMT = os.environ.get("FOLDJET_ENGINE_PWA_FP8_TRAIN_DO", "e4m3")
 #: "fused" (producers write the FP8 operands) or "proto" (PyTorch quantize passes)
-IMPL = os.environ.get("MINIWORLD_PWA_FP8_TRAIN_IMPL", "fused")
-HISTORY = int(os.environ.get("MINIWORLD_PWA_FP8_TRAIN_HISTORY", "16"))
-MARGIN = float(os.environ.get("MINIWORLD_PWA_FP8_TRAIN_MARGIN", "2"))
-FAST_ACCUM = os.environ.get("MINIWORLD_PWA_FP8_TRAIN_FASTACC") == "1"
+IMPL = os.environ.get("FOLDJET_ENGINE_PWA_FP8_TRAIN_IMPL", "fused")
+HISTORY = int(os.environ.get("FOLDJET_ENGINE_PWA_FP8_TRAIN_HISTORY", "16"))
+MARGIN = float(os.environ.get("FOLDJET_ENGINE_PWA_FP8_TRAIN_MARGIN", "2"))
+FAST_ACCUM = os.environ.get("FOLDJET_ENGINE_PWA_FP8_TRAIN_FASTACC") == "1"
 #: ln_vt8n (blocks per SM, TMA stages): measured best of {1, 2} x {2, 3, 4} (S1024 N768: 245 us at (1, 4), 310 at (2, 3))
 VT8N_CFG = (1, 4)
 #: smallest MSA depth S the FP8 route serves (measured wins: S 1024 .. 4096); below it the default route runs
-MIN_S = int(os.environ.get("MINIWORLD_PWA_FP8_TRAIN_MIN_S", "1024"))
+MIN_S = int(os.environ.get("FOLDJET_ENGINE_PWA_FP8_TRAIN_MIN_S", "1024"))
 #: pwa_glue3_f8 tile order: sp (the s pair) fastest, so concurrent CTAs store adjacent row pieces of do / doT
-G3_SWZ = os.environ.get("MINIWORLD_PWA_FP8_TRAIN_G3SWZ", "0") == "1"
-G3_MAP = os.environ.get("MINIWORLD_PWA_FP8_TRAIN_G3MAP", "0") == "1"
+G3_SWZ = os.environ.get("FOLDJET_ENGINE_PWA_FP8_TRAIN_G3SWZ", "0") == "1"
+G3_MAP = os.environ.get("FOLDJET_ENGINE_PWA_FP8_TRAIN_G3MAP", "0") == "1"
 
 E4M3_MAX, E5M2_MAX = 448.0, 57344.0
 W_SCALE = 2.0**-8
@@ -464,7 +465,7 @@ def backward_dw(d_o, do8, ds, v, vs):
 #: save the attention-weighted values ``o`` ([H, N, S*C], with v the largest saved tensor) as e4m3 + a delayed per-tensor power-of-two scale
 #: (``csrc/pwa_o8.cu``: one quantize pass in the forward, one dequantize pass in the backward). A MEMORY mode: -192 MiB of saved bytes at
 #: S1024 N768 (-22 %), peak -8 % more; costs two memory-bound passes (see docs/fp8_training.md)
-O8 = os.environ.get("MINIWORLD_PWA_FP8_TRAIN_O8") == "1"
+O8 = os.environ.get("FOLDJET_ENGINE_PWA_FP8_TRAIN_O8") == "1"
 
 
 def _o8_ext():

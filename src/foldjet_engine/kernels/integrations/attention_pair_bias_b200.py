@@ -10,7 +10,7 @@ repaired), which materializes extra FP32 workspaces and costs about 2x the step.
 
 Contract: bf16 activations (parameters bf16 or fp32 masters) or, H100, fp32 activations with fp32 parameters (the TF32 path at the
 end of this file), B >= 1 (H100 bf16 inference: the batch rows in one launch per stage; else one step per batch row; the packs made
-once: FoldForge 5I28 confidence head), d_single 384 as 8
+once: FoldJet 5I28 confidence head), d_single 384 as 8
 heads x 48, 12 x 32, 24 x 16 or 16 x 24 (AF3's Pairformer single attention), or d_single 512 as 16 x 32; d_pair 128 (any
 of those), 256 / 384 (8 or 16 heads) or 512 (16 heads) -- the wide pair kernels, inference and training --; gate_bias (a
 constant on the gate rows of the packed bias); no QK-norm, sm_90 (H100: ``refusal`` is the whole gate, the ``cuda`` backend of
@@ -44,6 +44,7 @@ from typing import Any
 import torch
 from torch.autograd.function import once_differentiable
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
 from foldjet_engine.kernels import _capture, _cast_cuda
 from foldjet_engine.kernels._compile import opaque
 from foldjet_engine.kernels._key_len import kernel_mask
@@ -304,13 +305,13 @@ def inference(
     """single [B, L, 384], pair [B, L, L, 128] bf16, mask [B, L] bool or None, leaves as ``_leaves`` -> single + APB(single). ``extra``
     [B, H, L, L] (any strides): an additive logit term (``extra_pair_bias``), added to the bias planes in their exp2 units.
 
-    B > 1 (FoldForge 5I28 confidence head: the samples' rows), the weight packs made once: H100 runs the batch rows together, one
+    B > 1 (FoldJet 5I28 confidence head: the samples' rows), the weight packs made once: H100 runs the batch rows together, one
     launch per stage (chunks of ``_batch_chunk`` rows; the per-row math of a B = 1 call, bit for bit), B200 the one-row step per batch
     row, each row written into its slice of the one output."""
     B, L = single.shape[:2]
     rows, dev = _rows(), single.device
     hopper = torch.cuda.get_device_capability(dev) == (9, 0)
-    # H100, L % 128 != 0 (FoldForge OpenDDE n = 12: 2976 tokens): the core takes whole 128-token tiles, so it runs at ``lq`` (single rows zero, the
+    # H100, L % 128 != 0 (FoldJet OpenDDE n = 12: 2976 tokens): the core takes whole 128-token tiles, so it runs at ``lq`` (single rows zero, the
     # pad keys masked, the pad query rows dropped); the PAIR is read as it is -- the pair pass writes the real [L, L] block of the [lq, lq]
     # bias planes (``pair_bias_padded``), so the call costs the unpadded pair read, not a padded copy of the whole pair
     lq = -(-L // 128) * 128 if (L % 128 and hopper) else L
@@ -376,29 +377,29 @@ def inference(
 
 
 _SIDE: dict = {}
-#: B200 step stages on side streams (MINIWORLD_APB_B200_STREAMS=0: every stage on the caller's stream, in program order). On by default:
+#: B200 step stages on side streams (FOLDJET_ENGINE_APB_B200_STREAMS=0: every stage on the caller's stream, in program order). On by default:
 #: measured under the speed tokens' graph timing (2026-11-17, same build, streams on / off): master eval 16 x 128 L 128 24.5 / 26.5 us,
 #: L 512 46.9 / 49.0 us; master train 16 x 512 L 128 91.9 / 100.3 us, L 512 307 / 326 us.
-_STREAMS = os.environ.get("MINIWORLD_APB_B200_STREAMS", "1") != "0"
+_STREAMS = os.environ.get("FOLDJET_ENGINE_APB_B200_STREAMS", "1") != "0"
 #: B200: the bf16 pair -> bias pass on tcgen05 (sm100/pair_fwd.cu) instead of the shared mma.sync pass
-_PAIR_TC = os.environ.get("MINIWORLD_APB_B200_PAIR_TC")
+_PAIR_TC = os.environ.get("FOLDJET_ENGINE_APB_B200_PAIR_TC")
 #: B200 inference: the weight packs through ``_capture.param_forms(capture_reads_eager=True)`` (grad off): made once per parameter version,
-#: read by a capture as its eager warm-up made them. MINIWORLD_APB_B200_EAGER_PACKS=0: packed inside every capture (one launch per replay).
-_EAGER_PACKS = os.environ.get("MINIWORLD_APB_B200_EAGER_PACKS", "1") != "0"
-#: B200 bf16 inference, d_pair 128 at L 384-640: SMs the pair pass leaves free (``sm_reserve``; MINIWORLD_APB_B200_FWD_RESERVE, 0: none).
+#: read by a capture as its eager warm-up made them. FOLDJET_ENGINE_APB_B200_EAGER_PACKS=0: packed inside every capture (one launch per replay).
+_EAGER_PACKS = os.environ.get("FOLDJET_ENGINE_APB_B200_EAGER_PACKS", "1") != "0"
+#: B200 bf16 inference, d_pair 128 at L 384-640: SMs the pair pass leaves free (``sm_reserve``; FOLDJET_ENGINE_APB_B200_FWD_RESERVE, 0: none).
 #: The pass fills every SM, so the q | k | v | g GEMM (ready when LayerNorm(single) ends, a few microseconds into the step) sat queued
 #: until the pass ended and ran as its tail; with 8 SMs' worth of blocks left out it starts under the pass.
-_FWD_RESERVE = int(os.environ.get("MINIWORLD_APB_B200_FWD_RESERVE", "8"))
-#: B200 bf16 inference: the pair pass starts when LayerNorm(single) has ended (MINIWORLD_APB_B200_PAIR_AFTER_LN=0: with the step). The pass
+_FWD_RESERVE = int(os.environ.get("FOLDJET_ENGINE_APB_B200_FWD_RESERVE", "8"))
+#: B200 bf16 inference: the pair pass starts when LayerNorm(single) has ended (FOLDJET_ENGINE_APB_B200_PAIR_AFTER_LN=0: with the step). The pass
 #: takes every SM at once; LayerNorm launched beside it ran starved (2.0 -> 2.8-5.6 us) and the GEMM after it later still. With LayerNorm
 #: alone first (~2 us), the GEMM and the pass start together. Measured (2026-11-17, master eval, graph timing, two A / B rounds, with the
 #: step -> after LN): 16 x 128 L 128 / 256 / 768 27.1 / 34.7 / 67.3 -> 24.4 / 32.6 / 63.5-65.0 us, 12 x 128 L 512 47.0 -> 43.1, 8 x 384 L 128 /
 #: 256 / 1024 30.5 / 42.8 / 170.4 -> 26.6 / 39.0 / 165.9, 16 x 512 L 128 / 384 32.6 / 66.0 -> 30.5 / 63.4; no case slower. (The fp32 FMA pass
 #: loses the same way round: 8 x 384 L 512 147.9 -> 169.8 us, so fp32 keeps its order.)
-_PAIR_AFTER_LN = os.environ.get("MINIWORLD_APB_B200_PAIR_AFTER_LN", "1") != "0"
+_PAIR_AFTER_LN = os.environ.get("FOLDJET_ENGINE_APB_B200_PAIR_AFTER_LN", "1") != "0"
 #: B200 bf16 inference (v20, 2026-11-17): the core after the q | k | v | g GEMM (and its key-split combine after it) launched as programmatic
-#: dependents (attn_inf -DPDLW=1, ksplit_combine through pdl_go). MINIWORLD_APB_B200_INF_PDL=0: plain launches.
-_INF_PDL = os.environ.get("MINIWORLD_APB_B200_INF_PDL", "1") != "0"
+#: dependents (attn_inf -DPDLW=1, ksplit_combine through pdl_go). FOLDJET_ENGINE_APB_B200_INF_PDL=0: plain launches.
+_INF_PDL = os.environ.get("FOLDJET_ENGINE_APB_B200_INF_PDL", "1") != "0"
 
 
 def _fwd_reserve(dp: int, L: int) -> int:
@@ -411,8 +412,8 @@ def _fwd_reserve(dp: int, L: int) -> int:
 
 #: B200 bf16 inference, d_pair 128 (v21, 2026-11-17): the pair pass as ``pair_bias_fwd2`` (apb_pair_fwd_rows_sm100.cuh: the shared pass with
 #: each warp's 16 rows loaded by its own lane / mbarrier) -- "stages:blocks per SM" (0: the occupancy); None: the shared pass.
-#: MINIWORLD_APB_B200_PF2 forces (0: off).
-_PF2 = os.environ.get("MINIWORLD_APB_B200_PF2", "2:0")
+#: FOLDJET_ENGINE_APB_B200_PF2 forces (0: off).
+_PF2 = os.environ.get("FOLDJET_ENGINE_APB_B200_PF2", "2:0")
 
 
 def _pf2(dp: int, L: int, heads: int, train: bool = False) -> tuple[int, int] | None:
@@ -435,11 +436,11 @@ def _pf2(dp: int, L: int, heads: int, train: bool = False) -> tuple[int, int] | 
 #: 90.5 -> 61.4 / 86.7, r146 L 768 61.4 -> 57.3, r147 L 512 / 768 50.7 / 69.6 -> 49.2 / 67.7, L 384 level to +1 us (r41 / r147): from L 512.
 #: Inference only: the training forward (A / B L 512 level, L 768 -1 to -9 us) read 3 more cases above 0.667 in the measurer (r146 L 640 / 768,
 #: r222 L 768, +5 to +9 us), so it keeps the plain loads.
-_PF2_EVF_MIN_L = int(os.environ.get("MINIWORLD_APB_B200_PF2_EVF_MIN_L", "512"))
+_PF2_EVF_MIN_L = int(os.environ.get("FOLDJET_ENGINE_APB_B200_PF2_EVF_MIN_L", "512"))
 
 
 def _pair_tc(dp: int, L: int, heads: int, train: bool = False) -> bool:
-    """Whether the bf16 pair -> bias pass runs on tcgen05 (MINIWORLD_APB_B200_PAIR_TC=0 / 1 forces). Measured (2026-11-17, master eval step,
+    """Whether the bf16 pair -> bias pass runs on tcgen05 (FOLDJET_ENGINE_APB_B200_PAIR_TC=0 / 1 forces). Measured (2026-11-17, master eval step,
     graph timing, the shared pass -> tcgen05): d_pair 256 L 512 / 768 59.3 / 94.1 -> 59.9 / 94.7 us, L 1024 / 1536 / 2048 139.7 / 274.3 / 458.6
     -> 135.6 / 252.4 / 410.5; d_pair 384 (8 heads) L 384 / 512 / 640 / 768 55.2 / 72.1 / 98.2 / 126.8 -> 55.9 / 71.7 / 92.7 / 113.2, (16 heads)
     L 256 / 384 / 512 42.9 / 59.4 / 79.8 -> 43.5 / 57.8 / 72.2; d_pair 512 L 256 / 384 / 512 / 768 45.0 / 69.5 / 88.0 / 159.7 -> 45.6 / 67.6 /
@@ -463,16 +464,16 @@ def _pair_tc(dp: int, L: int, heads: int, train: bool = False) -> bool:
 
 #: B200 training backward: SMs the pair backward leaves free (``apb_rows_sm100.cu`` sm_reserve). It fills every SM for most of the
 #: backward, so the main stream's row passes / GEMMs launched beside it (qkv_bwd, dW, dxa, ln_bwd) sat queued until it ended.
-_RESERVE = int(os.environ.get("MINIWORLD_APB_B200_SM_RESERVE", "8"))
+_RESERVE = int(os.environ.get("FOLDJET_ENGINE_APB_B200_SM_RESERVE", "8"))
 #: B200 training backward: dxa = dqkvg W (the head of the tail dxa -> ln_bwd -> finalize) is issued before dW q|k|v|g (a side stream).
 #: Measured (2026-11-17, master train, graph timing, after / before): 12 x 128 L 128 / 512 71.5 / 137.0 -> 69.4 / 133.1 us, 16 x 128 L 128 /
-#: 512 / 768 75.6 / 143.1 / 227.0 -> 71.6 / 139.1 / 218.9, 16 x 256 L 384 / 512 153.2 / 204.6 -> 149.4 / 200.7. MINIWORLD_APB_B200_DXA_FIRST=0: after.
-_DXA_FIRST = os.environ.get("MINIWORLD_APB_B200_DXA_FIRST", "1") != "0"
+#: 512 / 768 75.6 / 143.1 / 227.0 -> 71.6 / 139.1 / 218.9, 16 x 256 L 384 / 512 153.2 / 204.6 -> 149.4 / 200.7. FOLDJET_ENGINE_APB_B200_DXA_FIRST=0: after.
+_DXA_FIRST = os.environ.get("FOLDJET_ENGINE_APB_B200_DXA_FIRST", "1") != "0"
 #: B200 training backward, d_pair 128: the pair backward on tcgen05 (sm100 ``pair_bwd.cu``) instead of the mma.sync pass (L % 128 == 0).
-_PAIR_BWD_TC = os.environ.get("MINIWORLD_APB_B200_PAIR_BWD_TC", "1") != "0"
+_PAIR_BWD_TC = os.environ.get("FOLDJET_ENGINE_APB_B200_PAIR_BWD_TC", "1") != "0"
 #: v23 (2026-11-18): at L 128 the backward dQ + dbias pass as ``dqb_small`` (apb_rows_sm100.cu: a CTA per head and 32 query rows, mma.sync, no
-#: dQ combine: NH L / 32 CTAs instead of attn_dqb's NH work items). MINIWORLD_APB_B200_DQB_SMALL=0: attn_dqb.
-_DQB_SMALL = os.environ.get("MINIWORLD_APB_B200_DQB_SMALL", "1") != "0"
+#: dQ combine: NH L / 32 CTAs instead of attn_dqb's NH work items). FOLDJET_ENGINE_APB_B200_DQB_SMALL=0: attn_dqb.
+_DQB_SMALL = os.environ.get("FOLDJET_ENGINE_APB_B200_DQB_SMALL", "1") != "0"
 
 
 def _dqb_small(L: int) -> bool:
@@ -480,15 +481,15 @@ def _dqb_small(L: int) -> bool:
 
 
 #: v27 (2026-11-18): the training attention backward at L 128 / 256 in ONE launch (``small_core_bwd``: gate_bwd + attn_dkv + dqb + qkv_bwd;
-#: a CTA per head and SBWD query / key rows). 0: the separate stages. MINIWORLD_APB_B200_SBWD overrides.
-_SBWD = int(os.environ.get("MINIWORLD_APB_B200_SBWD", "32"))
+#: a CTA per head and SBWD query / key rows). 0: the separate stages. FOLDJET_ENGINE_APB_B200_SBWD overrides.
+_SBWD = int(os.environ.get("FOLDJET_ENGINE_APB_B200_SBWD", "32"))
 
 
 #: v27: finalize_red split into its three parts, each launched on the stream that makes its inputs (dWf part after the pair backward on
-#: side 1, the copies after the dW GEMMs on side 0, the row columns after ln_bwd on main). MINIWORLD_APB_B200_FSPLIT=0: one launch at the end.
+#: side 1, the copies after the dW GEMMs on side 0, the row columns after ln_bwd on main). FOLDJET_ENGINE_APB_B200_FSPLIT=0: one launch at the end.
 #: Measured (master train, A / B, the same bits): 16 heads L 128 -0.5 .. -1.9 us, L 256 -0.6 .. -3.0, L 384 -0.2 .. -1.6, L 768 level;
 #: 12 heads L 128 +1.5, L 768 +4.1: 16 heads up to L 512 only.
-_FSPLIT = os.environ.get("MINIWORLD_APB_B200_FSPLIT", "1") != "0"
+_FSPLIT = os.environ.get("FOLDJET_ENGINE_APB_B200_FSPLIT", "1") != "0"
 #: v29: the parts form at 12 heads up to L _FS12 (0: never) and at 24 heads at the lengths _FS24_L (16 heads: L <= 512 as above);
 #: _FR_MAXH: the most heads finalize_red serves. A / B (master train r147 24 x 128, one launch -> parts): L 256 79.9 -> 76.1 us (with the
 #: pair backward reserve 16), L 384 114.7 -> 111.5, L 512 149.7 -> 148.5 (measurer: 149.5 -> 153.7, not taken), L 640 201.4 -> 197.6, L 768
@@ -512,13 +513,13 @@ def _rsqd(heads: int, d: int) -> float:
     return float(d // heads) ** -0.5
 
 
-_PBTC_RESERVE = os.environ.get("MINIWORLD_APB_B200_PBTC_RESERVE")
+_PBTC_RESERVE = os.environ.get("FOLDJET_ENGINE_APB_B200_PBTC_RESERVE")
 #: B200 training, d_pair 128 tail (2026-11-17, part 5; measured per head count, ``_apb/ab.py`` interleaved graph replays):
 #: acc_reduce + finalize in one launch (``finalize_red``) at <= 16 heads (24 heads: its 24-head column sums per thread lost 2-10 us);
 #: the gate backward with every lane busy (``gate_bwd2``) at 12 heads (24: no gain); bias^T made in the forward beside the core
 #: (``bias_transpose64``, 64-block persistent grid) at <= 16 heads or L <= 256 (24 heads L 768: 10 us slower than the backward's own
-#: transpose beside dWo). MINIWORLD_APB_B200_P5=0: the part 4 forms everywhere.
-_P5 = os.environ.get("MINIWORLD_APB_B200_P5", "1") != "0"
+#: transpose beside dWo). FOLDJET_ENGINE_APB_B200_P5=0: the part 4 forms everywhere.
+_P5 = os.environ.get("FOLDJET_ENGINE_APB_B200_P5", "1") != "0"
 _TR_BLOCKS = 64
 
 
@@ -528,8 +529,8 @@ def _fwd_transpose(heads: int, L: int) -> bool:
 
 
 #: B200 training backward (2026-11-17, part 6): attn_dkv reads the bias as stored (``-DBIASNT=1``) where neither the forward nor the
-#: backward should transpose it. MINIWORLD_APB_B200_BIASNT=0: never (the backward transposes); =all: everywhere (no forward transpose).
-_BIASNT = os.environ.get("MINIWORLD_APB_B200_BIASNT", "1")
+#: backward should transpose it. FOLDJET_ENGINE_APB_B200_BIASNT=0: never (the backward transposes); =all: everywhere (no forward transpose).
+_BIASNT = os.environ.get("FOLDJET_ENGINE_APB_B200_BIASNT", "1")
 _BIASNT_ALL = _BIASNT == "all"
 
 
@@ -542,7 +543,7 @@ def _pbtc_reserve(heads: int, L: int) -> int:
     """SMs the tcgen05 pair backward leaves to the row passes / GEMMs beside it (qkv_bwd, dxa, dW q|k|v|g, ln_bwd): it is bound by the
     card's memory rate rather than by its SM count. Measured (2026-11-17, master train, graph timing, reserve 8 / 32 / 56): 16 x 128 L 384 /
     512 / 768 120.5 / 139.2 / 223.2 -> 110.4 / 135.5 / 227.1 / (56) 114.4 / 145.2 / 244.9 us; 12 x 128 100.3 / 130.8 / 198.4 -> 98.1 /
-    131.0 / 206.8; 24 x 128 118.6 / 155.5 / 266.2 -> 118.7 / 163.6 / 281.9. MINIWORLD_APB_B200_PBTC_RESERVE forces."""
+    131.0 / 206.8; 24 x 128 118.6 / 155.5 / 266.2 -> 118.7 / 163.6 / 281.9. FOLDJET_ENGINE_APB_B200_PBTC_RESERVE forces."""
     if _PBTC_RESERVE is not None:
         return int(_PBTC_RESERVE)
     # v20 (2026-11-17, master train L 128, reserve 32 -> 64 / 96, trimmed means): 12 x 128 61.5 -> 61.4 / 59.4 us, 16 x 128 (d 512) 71.7 ->
@@ -561,8 +562,8 @@ def _pbtc_reserve(heads: int, L: int) -> int:
 #: attn_fwd2 / attn_dkv -DPDLW=1, the row passes gate_rows / gate_bwd / qkv_bwd / ln_bwd / finalize_red through the extension's pdl_go; each
 #: opens with griddepcontrol.wait, so the values are the same). Measured (master train, graph replays interleaved, off -> on): L 128 12 x 128
 #: 63.5 -> 61.4 us, 16 x 256 77.8 -> 73.7, 16 x 384 90.1 -> 86.0; L 256 24 x 128 88.1 -> 84.0, 16 x 256 104.4 -> 98.4; L 512 / 768 level to
-#: 2-8 us slower (12 x 128: 125.0 -> 127.0, 190.5 -> 198.7): L <= 256 only. MINIWORLD_APB_B200_PDL=0 / 1 forces off / on.
-_PDL = os.environ.get("MINIWORLD_APB_B200_PDL")
+#: 2-8 us slower (12 x 128: 125.0 -> 127.0, 190.5 -> 198.7): L <= 256 only. FOLDJET_ENGINE_APB_B200_PDL=0 / 1 forces off / on.
+_PDL = os.environ.get("FOLDJET_ENGINE_APB_B200_PDL")
 _PDL_MAX = 256
 
 
@@ -719,10 +720,10 @@ def _inference_b200(single, pair, mask, params, leaves, eps_s, eps_p, gate_bias,
 
 
 #: B200 bf16 inference (2026-11-17, part 6): LayerNorm(single), the q | k | v | g GEMM and the pair pass in ONE launch (``inf_front``,
-#: apb_rows_sm100.cu), then the core and to_out: 3 launches per batch row instead of 5. MINIWORLD_APB_B200_FRONT=0 / 1 forces off / on (where
-#: the kernel serves: d_pair 128 / 256, L % 128 == 0); MINIWORLD_APB_B200_FRONT_PB: its pair blocks (0: the kernel's rule).
-_FRONT = os.environ.get("MINIWORLD_APB_B200_FRONT")
-_FRONT_PB = os.environ.get("MINIWORLD_APB_B200_FRONT_PB")
+#: apb_rows_sm100.cu), then the core and to_out: 3 launches per batch row instead of 5. FOLDJET_ENGINE_APB_B200_FRONT=0 / 1 forces off / on (where
+#: the kernel serves: d_pair 128 / 256, L % 128 == 0); FOLDJET_ENGINE_APB_B200_FRONT_PB: its pair blocks (0: the kernel's rule).
+_FRONT = os.environ.get("FOLDJET_ENGINE_APB_B200_FRONT")
+_FRONT_PB = os.environ.get("FOLDJET_ENGINE_APB_B200_FRONT_PB")
 
 
 def _front_pb(L: int, D: int, dp: int, heads: int) -> int:
@@ -736,9 +737,9 @@ def _front_pb(L: int, D: int, dp: int, heads: int) -> int:
     return -106 if (L in (256, 384) and D == 384 and dp == DP and heads in (12, 24)) else 0
 
 
-_FRONT_MAX = int(os.environ.get("MINIWORLD_APB_B200_FRONT_MAX", "256"))
-#: the core after the front launched as a programmatic dependent (attn_inf -DPDLW=1). MINIWORLD_APB_B200_FRONT_PDL=0: a plain launch.
-_FRONT_PDL = os.environ.get("MINIWORLD_APB_B200_FRONT_PDL", "1") != "0"
+_FRONT_MAX = int(os.environ.get("FOLDJET_ENGINE_APB_B200_FRONT_MAX", "256"))
+#: the core after the front launched as a programmatic dependent (attn_inf -DPDLW=1). FOLDJET_ENGINE_APB_B200_FRONT_PDL=0: a plain launch.
+_FRONT_PDL = os.environ.get("FOLDJET_ENGINE_APB_B200_FRONT_PDL", "1") != "0"
 
 
 def _front(dp: int, L: int, heads: int, D: int = 384) -> bool:
@@ -810,9 +811,9 @@ def _inference_front(single, pair, mask, params, leaves, eps_s, eps_p, gate_bias
 #: runs; 0: attn_inf + cuBLAS to_out.
 #: v26 (2026-11-18): the fused form (core + to_out in one launch: a cluster of the heads of a 16-query block exchanges the gated o by
 #: st.async into each peer's shared memory; 24 heads: 2 heads per CTA, a cluster of 12) at d_pair 128, L 128 (``_small_fused``).
-_SMALL = int(os.environ.get("MINIWORLD_APB_B200_SMALL", "1"))
+_SMALL = int(os.environ.get("FOLDJET_ENGINE_APB_B200_SMALL", "1"))
 #: v26: queries per CTA of the fused form (16 / 32 / 64): the o exchange per CTA is (H - heads per CTA) slots of that many rows
-_SCQB = int(os.environ.get("MINIWORLD_APB_B200_SCQB", "16"))
+_SCQB = int(os.environ.get("FOLDJET_ENGINE_APB_B200_SCQB", "16"))
 
 
 def _small_core(L: int, heads: int, dp: int) -> bool:
@@ -831,17 +832,17 @@ def _small_fused(L: int, dp: int) -> bool:
 
 
 #: v26 (2026-11-18): at L 384 / 512 / 640 the core as ``small_core`` in 128-key chunks (running maximum), no key split and no combine launch,
-#: where its CTAs fit in one wave (``_small_long``). MINIWORLD_APB_B200_SMALL_LONG: 1 the rule, 0 off (attn_inf + key split + combine), 32 / 64
-#: forces that many queries per CTA wherever the kernel serves (head width <= 32). MINIWORLD_APB_B200_SMALL_QB: queries per CTA of the
+#: where its CTAs fit in one wave (``_small_long``). FOLDJET_ENGINE_APB_B200_SMALL_LONG: 1 the rule, 0 off (attn_inf + key split + combine), 32 / 64
+#: forces that many queries per CTA wherever the kernel serves (head width <= 32). FOLDJET_ENGINE_APB_B200_SMALL_QB: queries per CTA of the
 #: core-only form at L 128 / 256 (0: the rule, 32 at L 256 up to 16 heads, else 64).
-_SMALL_LONG = int(os.environ.get("MINIWORLD_APB_B200_SMALL_LONG", "1"))
-_SMALL_QB = int(os.environ.get("MINIWORLD_APB_B200_SMALL_QB", "0"))  # 0: the rule in _sc_mode
+_SMALL_LONG = int(os.environ.get("FOLDJET_ENGINE_APB_B200_SMALL_LONG", "1"))
+_SMALL_QB = int(os.environ.get("FOLDJET_ENGINE_APB_B200_SMALL_QB", "0"))  # 0: the rule in _sc_mode
 
 
 #: v27 (2026-11-18): the non-front inference path (d_pair 256 / 384 / 512, where inf_front does not serve) at L 128 / 256: 2 the fused
-#: small_core (core + to_out) at L 128, 1 the core-only small_core at L 256, 0 attn_inf + cuBLAS to_out. MINIWORLD_APB_B200_SMALL_NF overrides.
-_SMALL_NF = os.environ.get("MINIWORLD_APB_B200_SMALL_NF")
-_SMALL_NFX = os.environ.get("MINIWORLD_APB_B200_SMALL_NFX", "1") != "0"  # also with an extra bias (folded into the planes by planes_fix)
+#: small_core (core + to_out) at L 128, 1 the core-only small_core at L 256, 0 attn_inf + cuBLAS to_out. FOLDJET_ENGINE_APB_B200_SMALL_NF overrides.
+_SMALL_NF = os.environ.get("FOLDJET_ENGINE_APB_B200_SMALL_NF")
+_SMALL_NFX = os.environ.get("FOLDJET_ENGINE_APB_B200_SMALL_NFX", "1") != "0"  # also with an extra bias (folded into the planes by planes_fix)
 
 
 def _small_nf(L: int, heads: int) -> int:
@@ -1002,8 +1003,8 @@ def _backward_fake(single, pair, mask, leaves, eps_s, eps_p, saved, dy):
 #: finalize_red_nc (no copy blocks; it reads neither GEMM output) runs on the main stream beside the GEMMs. The same values (bitwise).
 #: Measured (master train r148, graph replays interleaved, trimmed means, off -> on): L 128 63.6 / 63.5 -> 61.3 / 61.0 us, L 256 84.0 / 81.5 ->
 #: 83.4 / 83.5, L 384 110.4 / 108.6 -> 107.3 / 108.4, L 512 135.1 -> 133.0, L 768 218.4 -> 215.6; the other unpadded layouts (12 x 32, 24 x 16
-#: at 384: 5 MB less to copy) level to +1.6 us -- not routed. MINIWORLD_APB_B200_NOCOPY=0: the copying finalize everywhere.
-_NOCOPY = os.environ.get("MINIWORLD_APB_B200_NOCOPY", "1") != "0"
+#: at 384: 5 MB less to copy) level to +1.6 us -- not routed. FOLDJET_ENGINE_APB_B200_NOCOPY=0: the copying finalize everywhere.
+_NOCOPY = os.environ.get("FOLDJET_ENGINE_APB_B200_NOCOPY", "1") != "0"
 _NC_SMALL = (0, 1, 3, 8, 9)  # ln_single w / b, bq, ln_pair w, Wb: finalize_red_nc's outputs
 
 
@@ -1131,9 +1132,9 @@ def backward(
 
 #: v26: the bf16 training forward at L 128 (d_pair 128) as ONE launch for the core, the gate and to_out (``small_core_train``,
 #: apb_rows_sm100.cu: the fused small_core form with attn_fwd2's scaling, also writing O / LSE / og for the backward); the value is the
-#: queries per CTA (16 / 32), 0: attn_fwd2 -> gate_rows -> cuBLAS to_out. MINIWORLD_APB_B200_TRF overrides.
-_TRF = int(os.environ.get("MINIWORLD_APB_B200_TRF", "16"))
-_TRF256 = int(os.environ.get("MINIWORLD_APB_B200_TRF256", "0"))  # 1: also at L 256 (16 queries per CTA)
+#: queries per CTA (16 / 32), 0: attn_fwd2 -> gate_rows -> cuBLAS to_out. FOLDJET_ENGINE_APB_B200_TRF overrides.
+_TRF = int(os.environ.get("FOLDJET_ENGINE_APB_B200_TRF", "16"))
+_TRF256 = int(os.environ.get("FOLDJET_ENGINE_APB_B200_TRF256", "0"))  # 1: also at L 256 (16 queries per CTA)
 
 
 def _train_fused(L: int, dp: int, heads: int) -> bool:
@@ -1148,9 +1149,9 @@ def _train_fused(L: int, dp: int, heads: int) -> bool:
 #: 12.0, the pass 9.1 -> 11.7 us beside it). A / B (master train, interleaved replays, trimmed means, the same bits): L 256 r147 83.2 -> 80.4,
 #: r222 75.2 -> 74.7, r148 / r146 level; L 384 / 512 r148 106.0 / 133.6 -> 104.5 / 132.5, r222 103.9 -> 102.6, r146 level; L 768 r146 198.6
 #: -> 193.6, r148 223.5 -> 218.3, r222 216.2 -> 213.8, r147 +3.4; L 640 level; L 128 +1.3 to +2.7 (not routed). Wide pairs (d_pair 256-512,
-#: the tcgen05 / wide pass) lose: r223 / r225 / r226 / r47 L 256 / 384 +3 to +14 us -- d_pair 128 only. MINIWORLD_APB_B200_GEMM_FIRST = 0 / 1
+#: the tcgen05 / wide pass) lose: r223 / r225 / r226 / r47 L 256 / 384 +3 to +14 us -- d_pair 128 only. FOLDJET_ENGINE_APB_B200_GEMM_FIRST = 0 / 1
 #: forces.
-_GEMM_FIRST = os.environ.get("MINIWORLD_APB_B200_GEMM_FIRST")
+_GEMM_FIRST = os.environ.get("FOLDJET_ENGINE_APB_B200_GEMM_FIRST")
 
 
 def _gemm_first(L: int, heads: int, dp: int) -> bool:
@@ -1162,11 +1163,11 @@ def _gemm_first(L: int, heads: int, dp: int) -> bool:
 #: v28: prep_ln's minimum blocks per SM at D 512 (__launch_bounds__(256, 5)): without it the D 512 launch took 64 registers a thread, 4
 #: blocks per SM, and the 16 x 32 pack + LayerNorm (689 blocks) ran in two waves after the flush -- 6.2 -> 4.4 us (r148, timeline). A / B
 #: (master train r148, the same bits): L 128 / 256 / 384 / 512 55.4 / 78.5 / 108.8 / 135.5 -> 53.4 / 75.9 / 106.0 / 133.6 us. D 384 (48
-#: registers, 5 blocks per SM already) keeps the plain build. MINIWORLD_APB_B200_PREP_MB=0: off.
-_PREP_MB = int(os.environ.get("MINIWORLD_APB_B200_PREP_MB", "5"))
+#: registers, 5 blocks per SM already) keeps the plain build. FOLDJET_ENGINE_APB_B200_PREP_MB=0: off.
+_PREP_MB = int(os.environ.get("FOLDJET_ENGINE_APB_B200_PREP_MB", "5"))
 #: v28: the training forward runs pair_bias_fwd2 (v21's 8-lane-issue form, the same bits) from L 256 at 16 heads, else from L 384. A / B (with
-#: the GEMM first): L 256 r148 75.9 -> 73.9, r222 74.4 -> 74.0; 12 / 24 heads +1.4 / +0.8 (kept from 384). MINIWORLD_APB_B200_PF2_TMIN forces.
-_PF2_TMIN = os.environ.get("MINIWORLD_APB_B200_PF2_TMIN")
+#: the GEMM first): L 256 r148 75.9 -> 73.9, r222 74.4 -> 74.0; 12 / 24 heads +1.4 / +0.8 (kept from 384). FOLDJET_ENGINE_APB_B200_PF2_TMIN forces.
+_PF2_TMIN = os.environ.get("FOLDJET_ENGINE_APB_B200_PF2_TMIN")
 
 
 def _pf2_tmin(heads: int) -> int:
@@ -1913,9 +1914,9 @@ def _tc32(heads: int, dp: int, L: int) -> bool:
     return L % 128 == 0 and L >= 256 and (heads > 8 or (dp < 384 and L >= 384))
 
 
-#: B200 fp32 inference (2026-11-17, part 6): the pair pass on tcgen05 kind::tf32 (``sm100.apb_pair_fwd32``). MINIWORLD_APB_B200_PF32=0 / 1
+#: B200 fp32 inference (2026-11-17, part 6): the pair pass on tcgen05 kind::tf32 (``sm100.apb_pair_fwd32``). FOLDJET_ENGINE_APB_B200_PF32=0 / 1
 #: forces off / on (L % 128 == 0, d_pair % 64 == 0).
-_PF32 = os.environ.get("MINIWORLD_APB_B200_PF32")
+_PF32 = os.environ.get("FOLDJET_ENGINE_APB_B200_PF32")
 
 
 def _pf32(heads: int, dp: int, L: int) -> bool:

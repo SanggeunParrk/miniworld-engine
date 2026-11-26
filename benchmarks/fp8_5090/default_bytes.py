@@ -1,5 +1,5 @@
 """The default (FP8 off) outputs of the token / atom DiT blocks as sha256 of their bytes, for a byte comparison of two trees (run once per tree with
-PYTHONPATH pointing at it, every MINIWORLD_*FP8* variable unset): eval / master, shared conditioning, eager and a CUDA-graph replay.
+PYTHONPATH pointing at it, every FOLDJET_ENGINE_*FP8* variable unset): eval / master, shared conditioning, eager and a CUDA-graph replay.
 
     python default_bytes.py Module:A:L[:pick] ...
 """
@@ -11,7 +11,7 @@ import sys
 import torch
 from dit_common import Rig, case, graph
 
-assert not any("FP8" in k for k in os.environ if k.startswith("MINIWORLD")), "unset every MINIWORLD_*FP8* variable"
+assert not any("FP8" in k for k in os.environ if k.startswith("MINIWORLD")), "unset every FOLDJET_ENGINE_*FP8* variable"
 for spec in sys.argv[1:]:
     mod, A, L, *opt = spec.split(":")
     rig = Rig(case(mod, int(L), int(A), pick=opt[0] if opt else None))

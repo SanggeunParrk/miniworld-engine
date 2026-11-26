@@ -574,6 +574,6 @@ What each step was worth (globaltimer traces, `_r3/cgtrace.py`; graph script `_r
 measure.speed (every L128 eval row, cuda + triton + pytorch, `_r3/out/len/h1{off,on}_*`): r49 L128 depth 384 42.8 -> 38.8 us (0.709 ->
 0.642 of the H100); 0 cases above 0.667, ladder 0 violations (worst cuda / triton 0.574).
 
-## 2026-11-19 (agent C, n13-fp8-c): opt-in e4m3 products on B200 (`MINIWORLD_OPM_FP8=bound`, `MINIWORLD_PWA_FP8=1`, default OFF)
+## 2026-11-19 (agent C, n13-fp8-c): opt-in e4m3 products on B200 (`FOLDJET_ENGINE_OPM_FP8=bound`, `FOLDJET_ENGINE_PWA_FP8=1`, default OFF)
 OPM: the grouped product (60-77 % of the call from depth 1024, tensor bound) on e4m3, the narrow prologue writing e4m3 A2 / BT itself: module 0.63-0.82 of the bf16 route at depth >= 1024 (0.62 at L768 S2048). PWA: the key contraction on e4m3 with v written as e4m3 by `ln_vg_f8`
 (8 x 32, N^2 S >= 5e8): 0.88 at N 768 .. 0.69 at N 2048 (depth 1024); other builds from N 1280-1792. Default routes bit-identical (174 / 174). Details, tables, rejected placements: `docs/b200/fp8.md`.

@@ -1,4 +1,4 @@
-# RoseTTAFold3 TriAttn FP8 end-level (an3.py tables; FoldForge a9e1549, base fp8c/rf3if2 (engine 3.0.1), 200 steps, trunk seeds, diffusion_seed 0; H100). 2026-11-18
+# RoseTTAFold3 TriAttn FP8 end-level (an3.py tables; FoldJet a9e1549, base fp8c/rf3if2 (engine 3.0.1), 200 steps, trunk seeds, diffusion_seed 0; H100). 2026-11-18
 ## 12 targets x trunk seeds 0..3; modes bf16 / f8 (PV fused) / f8qk (PV + q / k) / safe (whole preset + the table's TriAttn part) / safenota (whole preset, TriAttn on the default core)
 target | bf16 seeds n, pair RMSD max/mean (A), ipTM range | per mode: n, same-seed RMSD max/mean, per-seed list, max|d ipTM|, inside
 7y37 | bf16 n=4 4.96/2.93 ipTM [0.096,0.100] | f8: n=4 4.88/1.52 [4.88 0.22 0.31 0.70] dip 0.002 in | f8qk: n=4 4.84/1.68 [4.84 0.93 0.64 0.32] dip 0.002 in | safe: n=4 5.00/1.59 [5.00 0.51 0.39 0.47] dip 0.003 in | safenota: n=4 4.85/1.51 [4.85 0.28 0.47 0.45] dip 0.004 in

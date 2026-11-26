@@ -16,9 +16,9 @@ Scales (``POLICY``):
   ``calib``  the docs/fp8.md convention: the first eager call measures max |A2|, max |BT| (one extra FP8 prologue with scale 1) and
              takes the power of two above it times ``HEADROOM`` (16); lazy guard ``overflow_peak()`` / ``rescale_all()`` + redo.
 
-Environment (read at import; the module globals can be set before a call / capture): ``MINIWORLD_OPM_FP8`` = ``bound`` | ``calib``,
-``MINIWORLD_OPM_FP8_GUARD`` = ``sync`` (eager: redo an overflowing call itself) | ``lazy`` | ``off``, ``MINIWORLD_OPM_FP8_HEADROOM``,
-``MINIWORLD_OPM_FP8_FASTACC=1`` (cuBLASLt fast accumulation), ``MINIWORLD_OPM_FP8_MINS`` (one depth gate replacing the shape rule `_gate`;
+Environment (read at import; the module globals can be set before a call / capture): ``FOLDJET_ENGINE_OPM_FP8`` = ``bound`` | ``calib``,
+``FOLDJET_ENGINE_OPM_FP8_GUARD`` = ``sync`` (eager: redo an overflowing call itself) | ``lazy`` | ``off``, ``FOLDJET_ENGINE_OPM_FP8_HEADROOM``,
+``FOLDJET_ENGINE_OPM_FP8_FASTACC=1`` (cuBLASLt fast accumulation), ``FOLDJET_ENGINE_OPM_FP8_MINS`` (one depth gate replacing the shape rule `_gate`;
 below it the bf16 default runs unchanged).
 """
 
@@ -32,18 +32,19 @@ from pathlib import Path
 
 import torch
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
 from foldjet_engine.fp8 import env as _fp8_env
 
 E4M3_MAX = 448.0
 
-POLICY = _fp8_env("MINIWORLD_OPM_FP8") or None
-GUARD = os.environ.get("MINIWORLD_OPM_FP8_GUARD", "sync")
-HEADROOM = float(os.environ.get("MINIWORLD_OPM_FP8_HEADROOM", "16"))
-FAST_ACCUM = os.environ.get("MINIWORLD_OPM_FP8_FASTACC") == "1"
+POLICY = _fp8_env("FOLDJET_ENGINE_OPM_FP8") or None
+GUARD = os.environ.get("FOLDJET_ENGINE_OPM_FP8_GUARD", "sync")
+HEADROOM = float(os.environ.get("FOLDJET_ENGINE_OPM_FP8_HEADROOM", "16"))
+FAST_ACCUM = os.environ.get("FOLDJET_ENGINE_OPM_FP8_FASTACC") == "1"
 #: the (padded) shapes the FP8 route takes; below them the bf16 default route runs unchanged. Module time, CUDA graph, same-cubin control
 #: (docs/fp8.md "OuterProductMean"): FP8 / default 0.74-0.93 at S 1024 from L 256 (1.05 at L 128), 0.62-0.93 at S 2048 (every L), 0.93-1.34
-#: at S 512 (no gain). ``MINIWORLD_OPM_FP8_MINS=<s>`` replaces the rule by one depth gate (0 = none).
-MIN_S: int | None = int(os.environ["MINIWORLD_OPM_FP8_MINS"]) if "MINIWORLD_OPM_FP8_MINS" in os.environ else None
+#: at S 512 (no gain). ``FOLDJET_ENGINE_OPM_FP8_MINS=<s>`` replaces the rule by one depth gate (0 = none).
+MIN_S: int | None = int(os.environ["FOLDJET_ENGINE_OPM_FP8_MINS"]) if "FOLDJET_ENGINE_OPM_FP8_MINS" in os.environ else None
 
 
 def _gate(s: int, n: int) -> bool:

@@ -13,7 +13,7 @@ and the rows kernels read the tables with their period (row r of the A x L rows 
 ``out = res + sigmoid(g) z``). ``augattn_sm80._fwd`` takes the attention gate as ``g2_table``; the transition's tail is the existing swiglu / GEMM / gate kernels.
 
 Numerics: the LayerNorm weight is multiplied into the projection weight before the bf16 rounding (instead of into the activation before it): the same bf16 rounding noise, a different rounding
-(inference only; ``MINIWORLD_TOKEN_COND_PACK=0`` turns the path off for an A / B).
+(inference only; ``FOLDJET_ENGINE_TOKEN_COND_PACK=0`` turns the path off for an A / B).
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ import os
 
 import torch
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
 from foldjet_engine.kernels._compile import opaque
 from foldjet_engine.kernels._device import capability as _devcap
 from foldjet_engine.kernels.integrations import adaln_sm80 as _ad
@@ -34,7 +35,7 @@ BF = torch.bfloat16
 def serves(block, single: torch.Tensor, cond: torch.Tensor, grad: bool) -> bool:
     """Whether this call of ``TokenDiTProtenix._forward_a100`` takes the pack: inference, bf16 activations, one fold, L a multiple of 128 (no row padding: the tables' period is L), both AdaLNs
     the sigmoid form of one LayerNorm epsilon."""
-    if grad or os.environ.get("MINIWORLD_TOKEN_COND_PACK", "1") == "0":
+    if grad or os.environ.get("FOLDJET_ENGINE_TOKEN_COND_PACK", "1") == "0":
         return False
     if _devcap(single.device) != (8, 0):  # measured and tested on the A100 only; the RTX 5090 keeps its unpacked path (cuda:5090_sm120 unchanged)
         return False

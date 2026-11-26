@@ -1,4 +1,4 @@
-"""R19 (FoldForge): a ``PairformerBlock`` on ``"pytorch"`` called without autograd over B > 1 samples (FoldForge's confidence head:
+"""R19 (FoldJet): a ``PairformerBlock`` on ``"pytorch"`` called without autograd over B > 1 samples (FoldJet's confidence head:
 ``[S, L, L, 128]`` fp32 activations under bf16 autocast, one CUDA graph per bucket) runs sample by sample: the same outputs as the batched
 composition, and temporaries of one sample instead of B."""
 
@@ -76,7 +76,7 @@ def test_per_sample_workspace_is_one_samples() -> None:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA device")
 def test_cuda_serves_the_batched_block() -> None:
-    """``cuda``: every sub-module takes ``B > 1`` (the single attention too: FoldForge 5I28 confidence head), so the block runs the batched
+    """``cuda``: every sub-module takes ``B > 1`` (the single attention too: FoldJet 5I28 confidence head), so the block runs the batched
     composition with and without autograd (no per-sample path: that is ``"pytorch"``'s workspace path), equal to B one-sample calls up to
     GEMM rounding (the batched triangle updates' GEMMs span B samples' rows)."""
     m = _block(True)  # fp32 masters, bf16 activations under autocast (the "master" case)

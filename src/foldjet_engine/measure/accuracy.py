@@ -19,7 +19,7 @@ upstream gradient (seeded, the same for every run). The error of a tensor is ``m
 gold is all zero). Dropout and other training noise (``p_drop``, ``nn.Dropout``, ``coordinate_noise``) is switched off in every run: its
 masks are random draws, not numerics.
 
-Every run gets fresh copies of the inputs. A ``*_shared_cond`` case (``config.keeps_expanded``: FoldForge's conditioning shared across the
+Every run gets fresh copies of the inputs. A ``*_shared_cond`` case (``config.keeps_expanded``: FoldJet's conditioning shared across the
 samples) keeps a stride-0 expanded input expanded in the gold and every backend run: its base is copied and expanded again with the same
 strides, and that base is the leaf whose gradient is measured (the sum over the expanded axis). Every other input is copied densely, as
 in every other case.
@@ -48,6 +48,7 @@ from collections import Counter, defaultdict
 
 import torch
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
 from foldjet_engine.measure import config as cfgmod
 from foldjet_engine.modules.primitives import BackendUnsupported
 

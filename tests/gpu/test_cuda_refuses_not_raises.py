@@ -1,10 +1,10 @@
-"""Calls from FoldForge's 5I28 run (2026-11-11, engine 2.5.1, H100) where a ``cuda`` backend claimed a call and its kernel then raised,
+"""Calls from FoldJet's 5I28 run (2026-11-11, engine 2.5.1, H100) where a ``cuda`` backend claimed a call and its kernel then raised,
 killing the fold instead of letting the caller fall back:
 
 - Chai-1's token DiT (n <= 4 copies, 128-512 tokens): bf16 ``single`` with the fp32 conditioning / pair; the H100 gate claimed it and
   ``conditioned_transition.cuda.token_inference`` raised ``ValueError('Hopper token CUDA candidate requires ...')``. The gate now asks for the
   launcher's own conditions (the pair in ``single``'s dtype, [B, L, L, w]), and the Chai-1 classes round the master layout's fp32
-  activations to bf16 at the entry (FoldForge R7), so the call is served.
+  activations to bf16 at the entry (FoldJet R7), so the call is served.
 - OpenDDE's triangle attention at 2048 tokens (16 copies): one sample's working set over the inference cap runs in blocks of pair rows
   (``triattn_h100_sm90._generic_rows``), whose q | k | v | g GEMM an enclosing bf16 autocast turned bf16; the fp16 core raised
   ``RuntimeError('q / k / v: [B, N, S, H, 32 | 16] fp16 rows at one common stride')``. The row-block path now runs with autocast off, as

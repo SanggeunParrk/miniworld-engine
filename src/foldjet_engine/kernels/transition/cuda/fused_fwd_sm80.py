@@ -93,7 +93,7 @@ CHAIN_MAX_ROWS = 65535 * 128
 def max_rows(device: torch.device, dtype: torch.dtype = torch.bfloat16) -> int:
     """Most rows one call of the sm_80 Transition takes on ``device``: (MAX_ITEMS - 2) tiles per SM of the one-kernel kernels (bf16: 256-row
     tiles, ``fused_sm80`` / the bf16 builds / ``fused_bwd_sm80``; the fp32 build: 128-row tiles) and the wide chain's row grid
-    (``CHAIN_MAX_ROWS``).  An inference call past it runs as one call per contiguous row block (``transition_sm80``; FoldForge 5I28: the template
+    (``CHAIN_MAX_ROWS``).  An inference call past it runs as one call per contiguous row block (``transition_sm80``; FoldJet 5I28: the template
     pair stack at 4 x 2048 x 2048 rows, the confidence block at 5 x 1536 x 1536); a training call past it is refused (``modules.Transition``)."""
     index = device.index if device.index is not None else torch.cuda.current_device()
     tile = 128 if dtype is torch.float32 else 256

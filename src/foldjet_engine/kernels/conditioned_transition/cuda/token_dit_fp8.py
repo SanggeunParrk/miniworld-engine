@@ -2,8 +2,8 @@
 
 Enable (environment, read at import; or set :data:`PLACES` / :data:`MIN_ROWS` at run time)::
 
-    MINIWORLD_TOKEN_DIT_FP8=qkvg,expand      # any of qkvg, expand, out, squeeze ("1" = qkvg,expand; "all" = the four)
-    MINIWORLD_TOKEN_DIT_FP8_MIN_ROWS=0       # one row gate for every placement (default: MIN_ROWS_PER; fewer step rows A B L keep bf16)
+    FOLDJET_ENGINE_TOKEN_DIT_FP8=qkvg,expand      # any of qkvg, expand, out, squeeze ("1" = qkvg,expand; "all" = the four)
+    FOLDJET_ENGINE_TOKEN_DIT_FP8_MIN_ROWS=0       # one row gate for every placement (default: MIN_ROWS_PER; fewer step rows A B L keep bf16)
 
 Scales: activations get a DYNAMIC per-row scale (row max / 448, computed where the row is made: the AdaLN row passes for the qkvg / expand
 inputs, a row pass for og / h), weights a static per-output-channel scale made once per weight pack. Nothing saturates by construction,
@@ -13,6 +13,8 @@ not needed here). Products: ``torch._scaled_mm`` with row-wise scales (bf16 out,
 """
 
 from __future__ import annotations
+
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
 
 import functools
 import os
@@ -39,12 +41,12 @@ def _parse(v: str) -> frozenset[str]:
     out = frozenset(p.strip() for p in v.split(",") if p.strip())
     bad = out - set(_ALL)
     if bad:
-        raise ValueError(f"MINIWORLD_TOKEN_DIT_FP8: unknown placements {sorted(bad)} (use {', '.join(_ALL)})")
+        raise ValueError(f"FOLDJET_ENGINE_TOKEN_DIT_FP8: unknown placements {sorted(bad)} (use {', '.join(_ALL)})")
     return out
 
 
 #: the e4m3 placements in force (empty: the default bf16 route)
-PLACES: frozenset[str] = _parse(_fp8_env("MINIWORLD_TOKEN_DIT_FP8", "") or "")
+PLACES: frozenset[str] = _parse(_fp8_env("FOLDJET_ENGINE_TOKEN_DIT_FP8", "") or "")
 #: Route call counters (``foldjet_engine.fp8.route_stats()``; plain ints at Python call time, never inside a kernel or graph replay):
 #: ``calls`` = block calls that took at least one placement, one counter per placement (``expand`` / ``qkvg`` / ``out`` / ``squeeze``),
 #: ``declined`` = block calls the route is on for (``PLACES`` set) that :func:`active` sent to the bf16 route (width / rows / fp32 / options).
@@ -62,8 +64,8 @@ MIN_ROWS_SCOPED = 3200
 MIN_ROWS_SCOPED_RF3 = 10240
 #: RoseTTAFold3 (parallel block, rows_q8 + expand), every pack made once
 MIN_ROWS_RF3 = 1920
-#: one override for every placement (``MINIWORLD_TOKEN_DIT_FP8_MIN_ROWS``; 0 = no gate), None: ``MIN_ROWS_PER``
-MIN_ROWS: int | None = int(os.environ["MINIWORLD_TOKEN_DIT_FP8_MIN_ROWS"]) if os.environ.get("MINIWORLD_TOKEN_DIT_FP8_MIN_ROWS") else None
+#: one override for every placement (``FOLDJET_ENGINE_TOKEN_DIT_FP8_MIN_ROWS``; 0 = no gate), None: ``MIN_ROWS_PER``
+MIN_ROWS: int | None = int(os.environ["FOLDJET_ENGINE_TOKEN_DIT_FP8_MIN_ROWS"]) if os.environ.get("FOLDJET_ENGINE_TOKEN_DIT_FP8_MIN_ROWS") else None
 
 _F8_PACKS: dict = _capture.weight_cache("conditioned_transition.token_fp8_packs")
 
@@ -99,20 +101,20 @@ def ext():
 
 
 #: B200 (sm_100a): the placements built there (the tcgen05 e4m3 expand; qkvg / out / squeeze are measured in docs/b200/fp8.md and not served
-#: unless listed by ``MINIWORLD_TOKEN_DIT_FP8_B200`` (comma list), the up-gate expand is not built) and their row gates (starting value = the H100 gate,
+#: unless listed by ``FOLDJET_ENGINE_TOKEN_DIT_FP8_B200`` (comma list), the up-gate expand is not built) and their row gates (starting value = the H100 gate,
 #: replaced by the B200 measurement, docs/b200/fp8.md)
 B200_PLACES: frozenset[str] = frozenset(
-    p for p in (_fp8_env("MINIWORLD_TOKEN_DIT_FP8_B200", "expand") or "").replace(" ", "").split(",") if p in _ALL
+    p for p in (_fp8_env("FOLDJET_ENGINE_TOKEN_DIT_FP8_B200", "expand") or "").replace(" ", "").split(",") if p in _ALL
 )
 #: CTAs of the e4m3 expand grid when the parallel block runs it beside the attention core (side stream, graph capture; docs/b200/fp8.md)
 B200_PAR_CTAS = 96
 MIN_ROWS_B200: dict[str, int] = {"qkvg": 2560, "expand": 1024, "out": 2560, "squeeze": 2560}
 #: agent E (2026-11-19): RoseTTAFold3's parallel non-identity block (``rows_q8`` + the e4m3 expand) on a B200 -- measured in docs/b200/fp8.md
-#: (served with the ``expand`` placement from ``MIN_ROWS_B200_RF3`` rows; ``MINIWORLD_TOKEN_DIT_FP8_B200_RF3=0`` turns it off)
-B200_RF3: bool = (_fp8_env("MINIWORLD_TOKEN_DIT_FP8_B200_RF3", "1") or "1") not in ("", "0")
+#: (served with the ``expand`` placement from ``MIN_ROWS_B200_RF3`` rows; ``FOLDJET_ENGINE_TOKEN_DIT_FP8_B200_RF3=0`` turns it off)
+B200_RF3: bool = (_fp8_env("FOLDJET_ENGINE_TOKEN_DIT_FP8_B200_RF3", "1") or "1") not in ("", "0")
 MIN_ROWS_B200_RF3 = 2560
-#: agent E: Boltz-2's up-gate expand on tcgen05 (``gemm_swiglu_f8_up_sm100.cu``; ``MINIWORLD_TOKEN_DIT_FP8_B200_UP=0`` turns it off), its row gate (docs/b200/fp8.md)
-B200_UP: bool = (_fp8_env("MINIWORLD_TOKEN_DIT_FP8_B200_UP", "1") or "1") not in ("", "0")
+#: agent E: Boltz-2's up-gate expand on tcgen05 (``gemm_swiglu_f8_up_sm100.cu``; ``FOLDJET_ENGINE_TOKEN_DIT_FP8_B200_UP=0`` turns it off), its row gate (docs/b200/fp8.md)
+B200_UP: bool = (_fp8_env("FOLDJET_ENGINE_TOKEN_DIT_FP8_B200_UP", "1") or "1") not in ("", "0")
 MIN_ROWS_B200_UP = 1280
 
 

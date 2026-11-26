@@ -2,7 +2,7 @@
 ``fp8.SM120_ROUTES``, the switch and interface of the H100 module ``integrations/local_dit_h100`` (``FP8_ROWS``, ``enable_fp8``, ``_fp8_parts``,
 ``STATS``)::
 
-    MINIWORLD_ATOMDIT_FP8=1        # (MINIWORLD_FP8=safe / engine-fp8 set this) 1 / all: pre + post; pre; post
+    FOLDJET_ENGINE_ATOMDIT_FP8=1        # (FOLDJET_ENGINE_FP8=safe / engine-fp8 set this) 1 / all: pre + post; pre; post
 
 On the 5090 every atom DiT block (Protenix, OpenFold3, Boltz-2, RoseTTAFold3, Chai-1: ``modules/dit_variant_cuda.VariantAtomCuda`` /
 ``_LocalAtomDiT``) runs ``dit_variants/cuda/train.atom_stack_train``: the train_rows.cu row passes, cuBLAS for every projection (K = 128 / 256:
@@ -48,7 +48,7 @@ def _fp8_parts(value: bool | str | Iterable[str] | None) -> frozenset:
 
 
 #: the e4m3 parts in force (``pre`` / ``post``; empty: the default)
-FP8_ROWS: frozenset = _fp8_parts(_fp8_env("MINIWORLD_ATOMDIT_FP8", ""))
+FP8_ROWS: frozenset = _fp8_parts(_fp8_env("FOLDJET_ENGINE_ATOMDIT_FP8", ""))
 #: route call counters (``fp8.route_stats()["atom_dit"]``; plain ints at Python call time): ``calls`` = block calls on e4m3, ``pre`` / ``post`` of
 #: those, ``fallbacks`` = block calls the route is on for that ran the default (``why_save``: a gradient, ``why_tf32``: fp32 activations or table,
 #: ``why_rows``: below :data:`MIN_ROWS`); ``why_opts`` / ``why_cond`` kept for the H100 keys (never counted here: every option and per-sample

@@ -9,8 +9,8 @@ What every engine module must serve, and how a backend of it is judged.
   Streams `token_folds` / `atom_folds` (TokenDiT* / AtomDiT* rows): the multi-fold layout `[S samples, F folds, L, d]`, one pair per fold, F = the
   row's `depths` (docs/modules.md, multi-fold contract).
   Streams ending in `_shared_cond` (`atom_single_shared_cond`, `token_single_shared_cond`, `atom_folds_shared_cond`,
-  `token_folds_shared_cond`; source "FoldForge shared cond"): the base stream's layout with the DiT `cond` shared across the S samples, one
-  tensor `[1, F, N, d]` expanded with stride 0 over S, as FoldForge's `AtomDiTStack` / `TokenDiTStack` / grouped sampler call the blocks;
+  `token_folds_shared_cond`; source "FoldJet shared cond"): the base stream's layout with the DiT `cond` shared across the S samples, one
+  tensor `[1, F, N, d]` expanded with stride 0 over S, as FoldJet's `AtomDiTStack` / `TokenDiTStack` / grouped sampler call the blocks;
   the backends serve that layout on dedicated shared paths. `make_inputs` gives that layout and the measurers keep it expanded (the base
   copied and expanded again; in train its gradient is the sum over the samples): docs/measure.md, shared conditioning. Only the classes
   with a shared path have such rows, with S > 1 (S = 1 has nothing to share).
@@ -19,26 +19,26 @@ What every engine module must serve, and how a backend of it is judged.
   bf16-parameter requirement, so no row says `bfloat16`; a class without parameters runs its bf16 activations as `master`); `modes` among
   `eval|train`.
   The trunk-side classes (pairformer / evoformer: TriangleMultiplication*, TriangleAttention*, OuterProductMean,
-  MSAPairWeightedAveraging, the Bidirectional* classes, PairformerBlock, the trunk Transitions) are `master` only: FoldForge builds the
-  trunk as master (FoldForge's `modules/engine/modules.py`); its `--precision fp32` runs the trunk in fp32 with TF32 off, which the `pytorch`
-  reference serves. Exception: the diffusion head's conditioning Transitions (FoldForge's `engine/graph.py make_conditioning_transition`, n = 2:
+  MSAPairWeightedAveraging, the Bidirectional* classes, PairformerBlock, the trunk Transitions) are `master` only: FoldJet builds the
+  trunk as master (FoldJet's `modules/engine/modules.py`); its `--precision fp32` runs the trunk in fp32 with TF32 off, which the `pytorch`
+  reference serves. Exception: the diffusion head's conditioning Transitions (FoldJet's `engine/graph.py make_conditioning_transition`, n = 2:
   pair 128 / 256 / 512, single 384 / 768) run fp32 + TF32 under `af3_default` / `model_default`, so those five Transition rows keep
   `float32|master` (user decisions 2026-11-10).
   `dims` / `options` are constructor arguments: `options` holds only arguments that change the class's math (not ones the class
   ignores, e.g. a flag only its caller reads) and, for the model classes (`TokenDiT*` / `AtomDiT*`), only values that differ from the
   class default (each model class defaults to its release's values). Rows with equal (module, stream, dims, options) are one row: the
   union of lengths / dtypes / modes / selector keys, the per-mode sample counts kept, all sources listed -- except training lengths:
-  no model trains at the long inference lengths (1024 / 1536 / 2048 tokens, 12288 / 16384 atoms; the FoldForge 5I28 benchmark is
+  no model trains at the long inference lengths (1024 / 1536 / 2048 tokens, 12288 / 16384 atoms; the FoldJet 5I28 benchmark is
   inference), so a case set reaching them is two rows: an `eval` row with every length and a `train` row (appended at the end of the
   file) with the training lengths only (<= 768 tokens, <= 8192 atoms); their modes never overlap (user decision 2026-11-12).
-  `source` says who builds the row (FoldForge / MiniWorld models, or `engine-own`: kept by the engine although no
+  `source` says who builds the row (FoldJet / MiniWorld models, or `engine-own`: kept by the engine although no
   downstream constructor builds it).
 - `requirements_kernel.csv` — `name,family,modules,role,version`: each kernel of the engine, the module classes whose backend
   launches it, and its role. A kernel has no range or tolerance of its own: both come from its module rows. Roles:
   `backward` computes gradients (a recompute launched inside a backward included); `forward_train` writes what only a backward reads
   and runs only on the grad path; `forward_infer` runs only on no-grad paths; `forward` runs on both. A kernel that no module launches
   (only kernel checks / drivers call it) is not listed. The diffusion sampler's glue (`kernels/sampler_ops`) and the smooth lDDT loss
-  are module classes with their own rows: `AugmentNoise`, `AlignEuler` (eval only, fp32 coordinates), `PoolAtoms` (bf16 pooling, eval and train: FoldForge R17) and
+  are module classes with their own rows: `AugmentNoise`, `AlignEuler` (eval only, fp32 coordinates), `PoolAtoms` (bf16 pooling, eval and train: FoldJet R17) and
   `SmoothLddtLoss`; each family is one shape-independent build per arch (the extensions `sampler_ops_sm90a` / `sampler_ops_sm80`, the smooth lDDT cubin; the
   shapes are runtime launch parameters), prebuilt when some row of its classes is. The La-Proteina pair embeddings and the token-pair
   initialisation (`kernels/pair_embed_adaln`, `kernels/pair_embed_geom`, `kernels/token_pair_init`) are module classes with their own

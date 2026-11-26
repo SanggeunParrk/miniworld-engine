@@ -13,8 +13,8 @@ Scales (``POLICY``, the H100 route's): ``bound`` = from the weights alone (|LN(x
 cast; no calibration, no host sync) -- the ``safe`` preset's; ``calib`` = the first eager call's max |A|, max |B| (power of two x ``HEADROOM``), guarded
 (``sync``: an overflowing eager call raises the scales and re-quantises; ``lazy`` / capture: ``overflow_peak`` / ``rescale_all`` through ``fp8.check()``).
 Same interface as ``opm_fp8`` (the H100 module of the slot): ``POLICY``, ``GUARD``, ``GUARD_STATS``, ``overflow_peak``, ``rescale_all``; registered in
-``fp8.SM120_ROUTES["opm"]``. Switches: ``MINIWORLD_OPM_FP8`` (``bound`` / ``calib``; ``safe`` sets ``bound``), ``MINIWORLD_OPM_FP8_GUARD``,
-``MINIWORLD_OPM_FP8_HEADROOM``, ``MINIWORLD_OPM_FP8_SM120_MINS`` (one depth gate replacing :func:`_gate`; 0 = no gate).
+``fp8.SM120_ROUTES["opm"]``. Switches: ``FOLDJET_ENGINE_OPM_FP8`` (``bound`` / ``calib``; ``safe`` sets ``bound``), ``FOLDJET_ENGINE_OPM_FP8_GUARD``,
+``FOLDJET_ENGINE_OPM_FP8_HEADROOM``, ``FOLDJET_ENGINE_OPM_FP8_SM120_MINS`` (one depth gate replacing :func:`_gate`; 0 = no gate).
 """
 
 from __future__ import annotations
@@ -25,13 +25,14 @@ import weakref
 
 import torch
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
 from foldjet_engine.fp8 import env as _fp8_env
 
 E4M3_MAX = 448.0
-POLICY = _fp8_env("MINIWORLD_OPM_FP8") or None
-GUARD = os.environ.get("MINIWORLD_OPM_FP8_GUARD", "sync")
-HEADROOM = float(os.environ.get("MINIWORLD_OPM_FP8_HEADROOM", "16"))
-MIN_S: int | None = int(os.environ["MINIWORLD_OPM_FP8_SM120_MINS"]) if "MINIWORLD_OPM_FP8_SM120_MINS" in os.environ else None
+POLICY = _fp8_env("FOLDJET_ENGINE_OPM_FP8") or None
+GUARD = os.environ.get("FOLDJET_ENGINE_OPM_FP8_GUARD", "sync")
+HEADROOM = float(os.environ.get("FOLDJET_ENGINE_OPM_FP8_HEADROOM", "16"))
+MIN_S: int | None = int(os.environ["FOLDJET_ENGINE_OPM_FP8_SM120_MINS"]) if "FOLDJET_ENGINE_OPM_FP8_SM120_MINS" in os.environ else None
 GUARD_STATS = {"calls": 0, "retries": 0, "fallbacks": 0, "capture_fallbacks": 0, "calibrations": 0, "declined": 0}
 _CACHES: dict = {}  # per module (key: data_ptr of to_left.weight, dropped with it): {"policy", "s" [2], "q" [2], "sab": (s0, s1)}
 _LAZY: dict = {}

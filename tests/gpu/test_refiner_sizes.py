@@ -1,4 +1,4 @@
-"""FoldForge OpenDDE's structural-token refiner (5I28 n = 12 / 16: S = 2976 / 3968 tokens) at d_pair 384: TriangleAttention (12 heads) and
+"""FoldJet OpenDDE's structural-token refiner (5I28 n = 12 / 16: S = 2976 / 3968 tokens) at d_pair 384: TriangleAttention (12 heads) and
 AttentionPairBias (8 heads, the refiner's extra_pair_bias) on the ``cuda`` / ``triton`` backends.
 
 The float64 / float32 references do not fit at S (the accuracy measurer records those cases as skipped), so the refiner sizes are checked by a
@@ -79,7 +79,7 @@ def test_attention_pair_bias_refiner_sizes_tiled(backend: str, P: int, R: int) -
     small = base.make_inputs(length=P, samples=1, depth=None, dtype=torch.bfloat16, device="cuda", generator=gen, stream=EXTRA_BIAS_STREAM)
     assert "extra_pair_bias" in small
     small["mask"][:, P - 5 :] = False
-    extra = small["extra_pair_bias"][0, 0]  # [P, P], expanded over the heads as FoldForge hands it
+    extra = small["extra_pair_bias"][0, 0]  # [P, P], expanded over the heads as FoldJet hands it
     with torch.no_grad():
         gold = copy.deepcopy(base).float()(**{k: v.float() if v.is_floating_point() else v for k, v in small.items()}).float()
         with torch.autocast("cuda", dtype=torch.bfloat16):

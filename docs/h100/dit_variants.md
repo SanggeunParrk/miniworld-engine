@@ -113,7 +113,7 @@ measured on the deleted dit_variants path): token stacks 2.8-4.1x and atom stack
 
 ## Chai-1 mixed layout: the bf16 entry form is cached (3.0.1)
 
-`MasterEntryCast` (Chai-1 token / atom blocks, FoldForge's bf16 `single` with fp32 `cond` / `pair`) rounds `cond` and `pair` to bf16 at the entry.
+`MasterEntryCast` (Chai-1 token / atom blocks, FoldJet's bf16 `single` with fp32 `cond` / `pair`) rounds `cond` and `pair` to bf16 at the entry.
 3.0.0 converted them at every call (`aten::to` of the fp32 `[1, 2048, 2048, 256]` pair: 42 % of a `token_single_fp32_cond` call at L 2048, S 5).
 `dit_variant_cuda._round_bf16` now makes the bf16 form once per input tensor (`kernels._capture.lookup_inputs`, store `_ENTRY_BF16` registered as
 `dit_variant_cuda.entry_bf16`, 4 entries): the key is storage (weak reference), address, layout and in-place version, so a sampler's steps (a

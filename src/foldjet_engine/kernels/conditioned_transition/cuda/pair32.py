@@ -9,6 +9,8 @@ The weights are expected TF32-rounded (``round_tf32``, once per static pack): th
 
 from __future__ import annotations
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
+
 import ctypes
 import functools
 import os
@@ -47,7 +49,7 @@ def _kernel(device_index: int, hr: int, nh: int, kd: int, kbx: int, epi: int, ng
     from foldjet_engine.kernels.augmented_attention.cuda import sm100
 
     defs = (f"HR={hr}", f"NH={nh}", f"KD={kd}", f"KBX={kbx}", f"EPI={epi}", f"NG={ng}")
-    defs += tuple(filter(None, os.environ.get("MINIWORLD_PAIR32_DEFS", "").split(",")))  # (timing builds: NOLOAD=1, NOMMA=1, MAXSTG=n)
+    defs += tuple(filter(None, os.environ.get("FOLDJET_ENGINE_PAIR32_DEFS", "").split(",")))  # (timing builds: NOLOAD=1, NOMMA=1, MAXSTG=n)
     return sm100._sm100_kernel(
         "tdt_pair32_sm100", "tdt_pair32", device_index, pdl=True, src_dir=_dir, defs=defs, cluster=2, smem=_smem(hr, nh, kd, kbx)
     )
@@ -70,7 +72,7 @@ def _ptr(t):
 
 
 def _env(name: str, default: int) -> int:
-    return int(os.environ.get(f"MINIWORLD_PAIR32_{name}", str(default)))
+    return int(os.environ.get(f"FOLDJET_ENGINE_PAIR32_{name}", str(default)))
 
 
 def _launch(a, w, epi, e, cfg):
@@ -92,9 +94,9 @@ CFG = {
     "swiglu": (64, 64, 2, 1),
     "resgate": (64, 64, 2, 1),
 }
-for _r in CFG:  # (sweeps: MINIWORLD_PAIR32_CFG_<role>=HR,NH,KBX,NG)
-    if os.environ.get(f"MINIWORLD_PAIR32_CFG_{_r}"):
-        CFG[_r] = tuple(int(v) for v in os.environ[f"MINIWORLD_PAIR32_CFG_{_r}"].split(","))
+for _r in CFG:  # (sweeps: FOLDJET_ENGINE_PAIR32_CFG_<role>=HR,NH,KBX,NG)
+    if os.environ.get(f"FOLDJET_ENGINE_PAIR32_CFG_{_r}"):
+        CFG[_r] = tuple(int(v) for v in os.environ[f"FOLDJET_ENGINE_PAIR32_CFG_{_r}"].split(","))
 
 
 def defs_of(role: str, kd: int = 768) -> tuple[str, ...]:
@@ -111,7 +113,7 @@ def prebuild_calls(d: int = 768, up: bool = False):
 
     roles = (
         ("plain", "swiglu_up") if up else ("plain",)
-    )  # (the out projection stays on cuBLAS by default: MINIWORLD_TOKEN_B200_PAIR32 bit 2)
+    )  # (the out projection stays on cuBLAS by default: FOLDJET_ENGINE_TOKEN_B200_PAIR32 bit 2)
     return [functools.partial(sm100.cubin, "tdt_pair32_sm100", defs_of(r, d), src_dir=_dir) for r in roles]
 
 

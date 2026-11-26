@@ -1,5 +1,5 @@
 """Kernel breakdown of the default Chai-1 TriAttn (64-channel heads) inference on the 5090: python triattn_d64_profile.py [--model chai1|chai1_confidence] [--ending] [--mask] D,H,L ...
-(D = d_pair, H heads of D / H channels; bf16 module as FoldForge runs it, key mask 1/8 masked with --mask)."""
+(D = d_pair, H heads of D / H channels; bf16 module as FoldJet runs it, key mask 1/8 masked with --mask)."""
 import sys
 
 import torch

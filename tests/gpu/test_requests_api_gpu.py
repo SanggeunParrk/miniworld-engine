@@ -1,4 +1,4 @@
-"""FoldForge API requests on the GPU: R1 (a weight replaced after ``clear_weight_caches`` is picked up by a cached H100 kernel path),
+"""FoldJet API requests on the GPU: R1 (a weight replaced after ``clear_weight_caches`` is picked up by a cached H100 kernel path),
 R18 (the multi-fold call of the DiT blocks on ``cuda`` (H100) and ``triton`` equals one call per fold; on A100 one sm_80 call per fold), R12 (``parallel_residual`` on ``triton`` and ``cuda``)."""
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ def test_clear_weight_caches_picks_up_a_replaced_weight():
 
 
 # ----------------------------------------------------------------------------------------------------------------------------- R18
-#: (id, block, stream, length, cuda serves on A100): N = 1000 (not a multiple of 32) only on H100; FoldForge's atom layout is whole
+#: (id, block, stream, length, cuda serves on A100): N = 1000 (not a multiple of 32) only on H100; FoldJet's atom layout is whole
 #: 32-atom windows, the sm_80 atom kernels take N a multiple of 64
 FOLD_CASES = [
     ("token", lambda: TokenDiT("protenix", 768, 384, 128, 16, 2), "token_folds", 128, True),

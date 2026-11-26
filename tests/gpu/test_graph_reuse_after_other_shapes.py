@@ -1,11 +1,11 @@
-"""FoldForge R26 memory safety: a graph captured at one shape, kept while graphs of other shapes are captured, then refreshed and replayed.
+"""FoldJet R26 memory safety: a graph captured at one shape, kept while graphs of other shapes are captured, then refreshed and replayed.
 
-FoldForge keeps one sampler graph per token shape (``static_weights()`` + ``static_inputs() as tables``) and serves later folds of that
+FoldJet keeps one sampler graph per token shape (``static_weights()`` + ``static_inputs() as tables``) and serves later folds of that
 shape by writing them into the graph's static tensors, ``tables.refresh(model)`` and a replay. The graph reads engine cache entries that
 its warm-up made eagerly (weight packs, the token DiT's grouped conditioning weights, the hoisted per-item tables, the APB packs). Capturing
 another shape makes and evicts entries of the same caches (the conditioning chunks are an LRU of 4, other stores replace or prune), and an
 evicted entry's memory went back to the allocator -- and, after ``torch.cuda.empty_cache()``, to the driver -- while the first graph still
-read it: an illegal memory access, NaNs or (with the memory reused) silently wrong outputs (engine 507d91366, FoldForge protenix1 /
+read it: an illegal memory access, NaNs or (with the memory reused) silently wrong outputs (engine 507d91366, FoldJet protenix1 /
 boltz2 at n = 4). The engine now holds every entry a capture reads for as long as the ``static_inputs()`` handle open at the capture
 (``kernels/_capture.hold``).
 
@@ -51,7 +51,7 @@ def _init(module):
 
 
 class Model(torch.nn.Module):
-    """The modules of a sampler step, shared by every shape's graph (one set of weights, as FoldForge's model)."""
+    """The modules of a sampler step, shared by every shape's graph (one set of weights, as FoldJet's model)."""
 
     def __init__(self, stack: str):
         super().__init__()
@@ -65,7 +65,7 @@ class Model(torch.nn.Module):
 
 
 class Step(torch.nn.Module):
-    """One sampler step at token length ``L`` on its own static tensors (FoldForge's static clone of a fold)."""
+    """One sampler step at token length ``L`` on its own static tensors (FoldJet's static clone of a fold)."""
 
     def __init__(self, model: Model, L: int):
         super().__init__()
@@ -107,7 +107,7 @@ class Step(torch.nn.Module):
 
 
 class Captured:
-    """A step's graph, its outputs and the ``static_inputs()`` handle (kept together, as FoldForge's per-shape cache entry)."""
+    """A step's graph, its outputs and the ``static_inputs()`` handle (kept together, as FoldJet's per-shape cache entry)."""
 
     def __init__(self, step: Step, seed: int):
         from foldjet_engine.capture import static_inputs, static_weights

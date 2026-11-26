@@ -1,7 +1,7 @@
 """OPM FP8 training step-time benchmark (H100, sm90). Run under Slurm on one GPU, e.g.
     python tools/fp8_train/opm_step_bench.py cases.txt out.jsonl     (cases: "L S d_msa d_pair after" per line, after 1 = AF3 order)
 Same process, CUDA graph of forward + backward (autograd.grad wrt msa and all weights), routes interleaved:
-  def = default route, ctl = default again (same-cubin control), e4m3 / e5m2 = MINIWORLD_OPM_FP8_TRAIN forced on (no shape gate).
+  def = default route, ctl = default again (same-cubin control), e4m3 / e5m2 = FOLDJET_ENGINE_OPM_FP8_TRAIN forced on (no shape gate).
 cool = 1.5 s idle then a ~40 ms burst (median of 3); sustained = after 1 s back-to-back, 3 blocks of ~60 ms (mean). Resumable (rows already
 in the output file are skipped); stops cleanly when $DEADLINE (epoch seconds) is within 90 s."""
 import copy

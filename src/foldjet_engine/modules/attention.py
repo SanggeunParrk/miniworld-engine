@@ -114,7 +114,7 @@ def _triton_core(q, k, v, bias, mask, head_major: bool = False):
 
 
 #: the requirements stream whose ``make_inputs`` adds an ``extra_pair_bias`` (OpenDDE's structural-token refiner: an [L, L] logit bias on every
-#: head, FoldForge R3)
+#: head, FoldJet R3)
 EXTRA_BIAS_STREAM = "token_single_extra_bias"
 
 
@@ -196,7 +196,7 @@ class AttentionPairBias(BackendModule, MasterWeights):
         "cuda:5090_sm120": 4,
         "triton:a100_sm80": 2,
         "triton:h100_sm90": 2,
-    }  # 2026-11-10: kits; sm_80 paths; 3: inference packs read by captures; triton:a100_sm80 / triton:h100_sm90 2 (2026-11-11): the Triton core returns dbias head-major on the A100 / H100; cuda:a100_sm80 4 / cuda:h100_sm90 2 (2026-11-11): B > 1 served (one step per batch row, FoldForge 5I28 confidence head); cuda:a100_sm80 5 (2026-11-12): the composed fp32 path's pair backward is one TF32 tensor-core launch for the batch (pair_bias_gen_bwd_tc); cuda:a100_sm80 6 (2026-11-12): the generic sm_80 pair-bias backward (pair_bias_gen_bwd, bf16 pairs) 1.4-2.1x faster, the same values; cuda:5090_sm120 2 (2026-11-12): the pair-bias backwards fit 99 KB on sm_120a (TF32 tensor-core kernel at 2 stages, d_pair 512 x 16 / 24 heads on the one-pass kernel with 8-element tiles)
+    }  # 2026-11-10: kits; sm_80 paths; 3: inference packs read by captures; triton:a100_sm80 / triton:h100_sm90 2 (2026-11-11): the Triton core returns dbias head-major on the A100 / H100; cuda:a100_sm80 4 / cuda:h100_sm90 2 (2026-11-11): B > 1 served (one step per batch row, FoldJet 5I28 confidence head); cuda:a100_sm80 5 (2026-11-12): the composed fp32 path's pair backward is one TF32 tensor-core launch for the batch (pair_bias_gen_bwd_tc); cuda:a100_sm80 6 (2026-11-12): the generic sm_80 pair-bias backward (pair_bias_gen_bwd, bf16 pairs) 1.4-2.1x faster, the same values; cuda:5090_sm120 2 (2026-11-12): the pair-bias backwards fit 99 KB on sm_120a (TF32 tensor-core kernel at 2 stages, d_pair 512 x 16 / 24 heads on the one-pass kernel with 8-element tiles)
     # cuda:b200_sm100 20 (2026-11-17, v20): bf16 / master training at L <= 256: the main stream's own kernels (attn_fwd2, gate_rows,
     # gate_bwd, attn_dkv, qkv_bwd, ln_bwd, finalize_red) launched as programmatic dependents (same values, bitwise); the tcgen05 pair backward
     # leaves 96 SMs at L 128 (partial-row count changes: same sums, another fixed order); bf16 inference: the core and its key-split combine
@@ -237,7 +237,7 @@ class AttentionPairBias(BackendModule, MasterWeights):
     # cuda:b200_sm100 1 (2026-11-16): B200 (sm_100a): bf16 / master inference and training on the sm_100a path of attention_pair_bias_b200.py;
     # fp32 inference on the B200 TF32 gated core (attn_inf_tf32 built per head layout); fp32 training refused
     # cuda:5090_sm120 3 (2026-11-13, main merge): the padded L % 128 inference and batched B > 1 paths above on the sm_120a build
-    # cuda:a100_sm80 7 / cuda:h100_sm90 3 (2026-11-12): inference at L % 128 != 0 runs padded to a multiple of 128 (FoldForge OpenDDE n = 12: 2976)
+    # cuda:a100_sm80 7 / cuda:h100_sm90 3 (2026-11-12): inference at L % 128 != 0 runs padded to a multiple of 128 (FoldJet OpenDDE n = 12: 2976)
     # cuda:h100_sm90 4 (2026-11-12): bf16 inference at B > 1 runs the batch rows together, one launch per stage (5 launches per chunk of
     # rows instead of 5 per row; the per-row values bit for bit): engine 2.4.4 parity at L 128 for the confidence head's S = 5 / 8
     # cuda:a100_sm80 8 / cuda:h100_sm90 5 (2026-11-13): inference skips what a padded key mask makes dead (bitwise the same outputs): the
@@ -343,7 +343,7 @@ class AttentionPairBias(BackendModule, MasterWeights):
             "single": random_input((samples, length, d_single), dtype=dtype, device=device, generator=generator),
             "pair": random_input((samples, length, length, d_pair), dtype=dtype, device=device, generator=generator),
             "mask": key_mask(samples, length, device=device),
-            # OpenDDE's refiner (FoldForge R3): one [L, L] bias expanded over the samples and the heads, as FoldForge hands it
+            # OpenDDE's refiner (FoldJet R3): one [L, L] bias expanded over the samples and the heads, as FoldJet hands it
             **(
                 {
                     "extra_pair_bias": random_input((length, length), dtype=dtype, device=device, generator=generator)[None, None].expand(
@@ -393,9 +393,9 @@ class AttentionPairBias(BackendModule, MasterWeights):
     # the gated sm_90a wgmma core, to_out accumulated onto the residual); a gradient -> one autograd Function (forward + backward on the same
     # rows / cores, fp32 weight gradients onto the parameters). Range = ``refusal``: bf16 activations (parameters bf16 or fp32 masters) or
     # float32 activations with float32 parameters (the TF32 path: attn_tf32 core, fp32 row / pair kernels, fp32 GEMMs), any batch B
-    # (the one-row step per batch row inside each op, the weight packs made once; FoldForge 5I28 confidence head: its samples as B),
+    # (the one-row step per batch row inside each op, the weight packs made once; FoldJet 5I28 confidence head: its samples as B),
     # 8 x 48 / 12 x 32 / 16 x 24 / 24 x 16 heads at d_single 384 or 16 x 32 at 512, d_pair 128, 256 / 384 (8 or 16 heads) or 512 (16 heads),
-    # gate_bias, no QK-norm, L a multiple of 128; everything else is refused, never run elsewhere. extra_pair_bias (eval only, FoldForge R3:
+    # gate_bias, no QK-norm, L a multiple of 128; everything else is refused, never run elsewhere. extra_pair_bias (eval only, FoldJet R3:
     # OpenDDE's refiner): added to the bias planes the pair pass writes, before the core, in the core's units (exp2; the fp32 core's key order).
     # A100 (sm_80): kernels/integrations/attention_pair_bias_sm80.py -- the fused C++ step (bf16 activations, any B, the same head layouts,
     # d_pair 128, any L, no gate_bias) and, for fp32 (TF32 core), the wider pairs (256 / 384 / 512) and gate_bias, the path composed from
@@ -458,7 +458,7 @@ class AttentionPairBias(BackendModule, MasterWeights):
             and self._pads(single, pair, mask, extra_pair_bias)
             and not self._reads_ragged(single)
         ):
-            # inference at L % 128 != 0 (FoldForge OpenDDE n = 12: 2976 structural tokens): the kernels take whole 128-token tiles, so the
+            # inference at L % 128 != 0 (FoldJet OpenDDE n = 12: 2976 structural tokens): the kernels take whole 128-token tiles, so the
             # call runs at the next multiple of 128 -- zero single rows and pair entries, the pad keys masked (-inf: no weight), the pad
             # query rows dropped. Every real row attends over the same keys with the same logits as unpadded.
             lp = -(-L // 128) * 128
@@ -477,7 +477,7 @@ class AttentionPairBias(BackendModule, MasterWeights):
                 return native.update_inference(self, single, pair, mask, extra=extra, lp=lp)
             single_p, pair_p, mask_p, extra_p = _pad_tokens(single, pair, mask, extra_pair_bias, lp)
             return self._forward_cuda(single_p, pair_p, mask_p, extra_p)[:, :L].contiguous()
-        # extra_pair_bias (eval only, ``_supports_cuda``): [B, H, L, L] planes added to the kernels' hoisted bias before the core (FoldForge R3)
+        # extra_pair_bias (eval only, ``_supports_cuda``): [B, H, L, L] planes added to the kernels' hoisted bias before the core (FoldJet R3)
         extra = None if extra_pair_bias is None else _extra_planes(extra_pair_bias, single.shape[0], self.n_head, single.shape[1])
         if _devcap(single.device) in _SM80_BUILDS:
             from foldjet_engine.kernels.integrations import attention_pair_bias_sm80 as sm80
@@ -972,7 +972,7 @@ class BiasOnlyAttention(BackendModule):
 
     def set_pair_bias_logits(self, mode: str | None):
         """Pair-bias logits precision of this module (:mod:`foldjet_engine.bias_logits`): ``"fp32"`` (default; training always), ``"bf16"``
-        (inference only), ``None`` (the process default / ``MINIWORLD_BIAS_LOGITS``). Returns ``self``."""
+        (inference only), ``None`` (the process default / ``FOLDJET_ENGINE_BIAS_LOGITS``). Returns ``self``."""
         if mode is not None:
             _bias_logits._check(mode, "set_pair_bias_logits")
         self.pair_bias_logits = None if mode is None else mode.strip().lower()

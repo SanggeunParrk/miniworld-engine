@@ -1,4 +1,4 @@
-"""H100 ``pwa_train`` / ``pwa_wide`` inference past N 2048 (FoldForge AF3 n >= 17: N 2176 .. 3200+): ``pair_fwd3`` stages the bf16 logits in the output rows
+"""H100 ``pwa_train`` / ``pwa_wide`` inference past N 2048 (FoldJet AF3 n >= 17: N 2176 .. 3200+): ``pair_fwd3`` stages the bf16 logits in the output rows
 (``csrc/pair3.cu`` / ``pair_wide.cu`` GLOB) when the shared-memory row does not fit.  The cuda backend must serve these lengths (no CUDA hole) and match a
 row-chunked float64 reference as closely as the ``pytorch`` backend does (the engine accuracy standard, not bit-identity); N <= 2048 keeps the shared-memory
 path, and the output-row path reproduces it bit for bit there (wide pair kernels)."""

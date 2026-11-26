@@ -44,5 +44,5 @@ new2 = "        if s_dv is not None:\n            side.join(x.device, s_dv)   # 
 assert body.count(old2) == 1
 body = body.replace(old2, new2)
 s = s[:i0] + body + s[i1:]
-s = s.replace('int(os.environ.get("MINIWORLD_BIDIR_B200_SIDE", "3"))   # bit 0: the dWo branch, bit 1: the dW branch', 'int(os.environ.get("MINIWORLD_BIDIR_B200_SIDE", "3"))   # bit 0: the dWo branch, bit 1: the dW branch, bit 2: the dV branch')
+s = s.replace('int(os.environ.get("FOLDJET_ENGINE_BIDIR_B200_SIDE", "3"))   # bit 0: the dWo branch, bit 1: the dW branch', 'int(os.environ.get("FOLDJET_ENGINE_BIDIR_B200_SIDE", "3"))   # bit 0: the dWo branch, bit 1: the dW branch, bit 2: the dV branch')
 open(p, "w").write(s); print("ok")

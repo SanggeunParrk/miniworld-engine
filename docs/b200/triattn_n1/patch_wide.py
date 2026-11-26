@@ -53,7 +53,7 @@ new2 = '''    if s_bias is not None:
 '''
 assert s.count(old2) == 1
 s = s.replace(old2, new2)
-anchor = "BWD_PRE = os.environ.get(\"MINIWORLD_TRIATTN_B200_BWD_PRE\", \"1\") != \"0\"\n"
+anchor = "BWD_PRE = os.environ.get(\"FOLDJET_ENGINE_TRIATTN_B200_BWD_PRE\", \"1\") != \"0\"\n"
 assert anchor in s
-s = s.replace(anchor, anchor + "#: (N1) the wide backward's weight-gradient GEMMs (dWo, the bias column sum, dWo2) as branches of the captured graph beside the G GEMM / tri_wfinish.\n#: MINIWORLD_TRIATTN_B200_WIDE_SIDE=0 turns it off.\nWIDE_SIDE = os.environ.get(\"MINIWORLD_TRIATTN_B200_WIDE_SIDE\", \"1\") != \"0\"\n", 1)
+s = s.replace(anchor, anchor + "#: (N1) the wide backward's weight-gradient GEMMs (dWo, the bias column sum, dWo2) as branches of the captured graph beside the G GEMM / tri_wfinish.\n#: FOLDJET_ENGINE_TRIATTN_B200_WIDE_SIDE=0 turns it off.\nWIDE_SIDE = os.environ.get(\"FOLDJET_ENGINE_TRIATTN_B200_WIDE_SIDE\", \"1\") != \"0\"\n", 1)
 open(p, "w").write(s); print("ok")

@@ -36,8 +36,8 @@ old = '''def _mod():
     return load_extension(
         name="triattn_b200_mod_v22_tt10", sources=[str(_SRC / "triattn_mod_sm100.cu")], extra_cuda_cflags=_flags(), verbose=False
     )'''
-new = '''#: (N1) the ending node's row-tile kernels visit tiles n-fastest (`tperm`, sm100.cuh). MINIWORLD_TRIATTN_B200_TPERM=0 turns it off.
-TPERM = os.environ.get("MINIWORLD_TRIATTN_B200_TPERM", "1") != "0"
+new = '''#: (N1) the ending node's row-tile kernels visit tiles n-fastest (`tperm`, sm100.cuh). FOLDJET_ENGINE_TRIATTN_B200_TPERM=0 turns it off.
+TPERM = os.environ.get("FOLDJET_ENGINE_TRIATTN_B200_TPERM", "1") != "0"
 
 
 def _mod():

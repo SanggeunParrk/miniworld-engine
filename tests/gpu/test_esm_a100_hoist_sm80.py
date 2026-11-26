@@ -1,6 +1,6 @@
 """A100: ``AtomDiTESMFold2Pair`` inference hoists its conditioning table and windowed pair bias per fold (``local_dit_esm._infer_a100_hoisted``).
 
-The hoisted builds are ``_block``'s own statements, so every call equals the call with the hoist off (``MINIWORLD_ESM_A100_HOIST=0``) BITWISE; a new
+The hoisted builds are ``_block``'s own statements, so every call equals the call with the hoist off (``FOLDJET_ENGINE_ESM_A100_HOIST=0``) BITWISE; a new
 conditioning or pair tensor, an in-place weight change and another key mask must not be served the old tables."""
 
 import pytest
@@ -36,7 +36,7 @@ def _inputs(a, n, real, dtype, seed=1):
 
 
 def _run(blk, s, c, z, mask, rope, hoist, monkeypatch):
-    monkeypatch.setenv("MINIWORLD_ESM_A100_HOIST", hoist)
+    monkeypatch.setenv("FOLDJET_ENGINE_ESM_A100_HOIST", hoist)
     with torch.no_grad():
         return blk(s, c, z, mask=mask, rope=rope).clone()
 

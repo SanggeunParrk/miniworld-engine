@@ -5,8 +5,8 @@ anchor = "def _ln_fwd(g, x, lnw, lnb, eps, L):"
 flag = '''#: (N1) the single-direction training backward's two weight-gradient GEMMs (dWo = dt^T u, dW = dc^T y: tall-K split-K GEMMs of 9-12 us at L128, 36 us at L512
 #: with their reduce) off the main chain as branches of the captured graph (they read tensors the chain already has and nothing reads their results before the
 #: end): the dWo GEMM beside the gate backward / core GEMMs, the dW GEMM beside the dyln GEMM and the LayerNorm backward. One sample (B = 1), B200, graph capture only.
-#: MINIWORLD_BIDIR_B200_SIDE=0 turns it off.
-B200_SIDE = os.environ.get("MINIWORLD_BIDIR_B200_SIDE", "1") != "0"
+#: FOLDJET_ENGINE_BIDIR_B200_SIDE=0 turns it off.
+B200_SIDE = os.environ.get("FOLDJET_ENGINE_BIDIR_B200_SIDE", "1") != "0"
 
 
 '''

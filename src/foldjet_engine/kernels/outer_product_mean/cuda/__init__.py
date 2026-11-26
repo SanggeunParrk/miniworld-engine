@@ -101,4 +101,4 @@ def prebuild(target, rows):
         yield chai_ext
         from foldjet_engine.kernels.outer_product_mean import chai as _chai
 
-        yield _chai._f8_ext  # the opt-in e4m3 grouped product (MINIWORLD_OPM_FP8=bound + the depth gate; docs/fp8.md)
+        yield _chai._f8_ext  # the opt-in e4m3 grouped product (FOLDJET_ENGINE_OPM_FP8=bound + the depth gate; docs/fp8.md)

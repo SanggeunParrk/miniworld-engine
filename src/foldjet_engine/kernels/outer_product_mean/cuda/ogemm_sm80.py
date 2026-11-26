@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
+
 import functools
 from pathlib import Path
 
@@ -70,10 +72,10 @@ def all_live(mask_u8: torch.Tensor) -> bool:
 
     A host-side choice of the product only (both are exact): read once per mask tensor (address, version, shape) outside a graph capture -- one small
     reduction and a sync -- and remembered; during a capture the remembered answer is used (a mask not seen before: the skip kernel). A graph is
-    captured after its eager warm-up calls, which have probed the same static mask. ``MINIWORLD_OPM_PROBE=0`` always takes the skip kernel."""
+    captured after its eager warm-up calls, which have probed the same static mask. ``FOLDJET_ENGINE_OPM_PROBE=0`` always takes the skip kernel."""
     import os
 
-    if os.environ.get("MINIWORLD_OPM_PROBE", "1") == "0":
+    if os.environ.get("FOLDJET_ENGINE_OPM_PROBE", "1") == "0":
         return False
     key = (mask_u8.data_ptr(), mask_u8._version, tuple(mask_u8.shape), mask_u8.device.index)
     hit = _PROBES.get(key)

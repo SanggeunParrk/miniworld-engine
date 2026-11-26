@@ -244,7 +244,7 @@ def _forward(args: list[torch.Tensor], eps: float, after: bool, dmin: float, dof
         (wa16, wb16, wo16, bo16, *pb16), w16 = _bf16_params(ps)
     lnw_, lnb_ = lnw.detach().contiguous(), lnb.detach().contiguous()
     f8 = None
-    if not save and _F8_ON():  # opt-in e4m3 product (MINIWORLD_OPM_FP8=bound)
+    if not save and _F8_ON():  # opt-in e4m3 product (FOLDJET_ENGINE_OPM_FP8=bound)
         from . import opm_fp8_b200 as _f8b
 
         f8 = _f8b.serves(args, n, m.shape[0], save)

@@ -13,6 +13,7 @@ import os
 
 import torch
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
 from foldjet_engine.kernels import _capture
 
 #: Samples ONE LAUNCH takes at each pair width (MiniWorld folds templates, structures or augments into the batch of one pair stack;

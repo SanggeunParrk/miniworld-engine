@@ -1,4 +1,4 @@
-"""FoldForge R13 on the kernel backends (H100 and A100): ``AtomDiTOpenFold3(mask_form="af3")`` under 128 real atoms matches the reference
+"""FoldJet R13 on the kernel backends (H100 and A100): ``AtomDiTOpenFold3(mask_form="af3")`` under 128 real atoms matches the reference
 backend's form, and the real rows read the padding keys (they differ from the default form's)."""
 
 from __future__ import annotations

@@ -1,7 +1,7 @@
-"""A backend's range check takes exactly what its forward takes (FoldForge 5I28 run, A100: ``AtomDiTChai1.unsupported(single, cond,
+"""A backend's range check takes exactly what its forward takes (FoldJet 5I28 run, A100: ``AtomDiTChai1.unsupported(single, cond,
 pair, mask, uid)`` raised ``TypeError`` -- the inherited ``_supports_triton`` had no positional ``uid``).
 
-FoldForge asks :meth:`~foldjet_engine.modules.primitives.BackendModule.unsupported` with the forward's own arguments, positionally,
+FoldJet asks :meth:`~foldjet_engine.modules.primitives.BackendModule.unsupported` with the forward's own arguments, positionally,
 before each call; a range check that cannot bind them is a crash where a refusal (or ``None``) was due. For every requirements class and
 every backend it lists:
 
@@ -81,7 +81,7 @@ def test_supports_binds_the_forward_arguments(module: str, backend: str):
 
 @pytest.mark.parametrize(("module", "backend"), PAIRS, ids=[f"{m}-{b}" for m, b in PAIRS])
 def test_unsupported_takes_make_inputs_positionally(module: str, backend: str):
-    """``unsupported`` with the measurement inputs passed positionally in forward order (FoldForge's call) answers, never raises."""
+    """``unsupported`` with the measurement inputs passed positionally in forward order (FoldJet's call) answers, never raises."""
     n, row = FIRST[module]
     m, inputs = _build(n, row, backend)
     sig = _call_signature(m, backend)

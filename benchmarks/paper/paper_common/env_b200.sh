@@ -9,12 +9,12 @@ ENGINE=${ENGINE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}
 ENV=${ENGINE_ENV:-$W/eng-2511/.pixi/envs/default}
 export PATH=$ENV/bin:$PATH LD_LIBRARY_PATH=$ENV/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH} PYTHONPATH=${ENGINE_PYTHONPATH:-$ENGINE/src} PYTHONUNBUFFERED=1 PYTHONNOUSERSITE=1
 export TMPDIR=$PAPER_B200_HOME/tmp XDG_CACHE_HOME=$PAPER_B200_HOME/cache MPLCONFIGDIR=$PAPER_B200_HOME/cache/matplotlib
-export MINIWORLD_ENGINE_JIT_ROOT=$XDG_CACHE_HOME/jit TORCH_EXTENSIONS_DIR=$XDG_CACHE_HOME/torch_ext TRITON_CACHE_DIR=$XDG_CACHE_HOME/triton TORCHINDUCTOR_CACHE_DIR=$XDG_CACHE_HOME/inductor
+export FOLDJET_ENGINE_JIT_ROOT=$XDG_CACHE_HOME/jit TORCH_EXTENSIONS_DIR=$XDG_CACHE_HOME/torch_ext TRITON_CACHE_DIR=$XDG_CACHE_HOME/triton TORCHINDUCTOR_CACHE_DIR=$XDG_CACHE_HOME/inductor
 export CUDA_HOME=${CUDA_HOME:-/usr/local/cuda} CUDA_DEVICE_ORDER=PCI_BUS_ID NVCC_PREPEND_FLAGS="-ccbin /usr/bin/g++"
 export PATH=$PATH:$CUDA_HOME/bin
 export CUTLASS_PATH=${CUTLASS_PATH:-$W/refs/cutlass} CUTLASS_DIR=${CUTLASS_DIR:-$W/refs/cutlass}
 mkdir -p "$TMPDIR" "$XDG_CACHE_HOME"
-export MINIWORLD_ANTHROPIC_ROOT=${MINIWORLD_ANTHROPIC_ROOT:-$W/eng-2511/third_party/anthropic/upstream}
+export FOLDJET_ENGINE_ANTHROPIC_ROOT=${FOLDJET_ENGINE_ANTHROPIC_ROOT:-$W/eng-2511/third_party/anthropic/upstream}
 # kit stack: the B200 driver (CUDA 13.1) needs no container: kit_stack_b200.sh with KIT_VENV = a venv of torch 2.13.0+cu130 + triton 3.7.1 (built under $PAPER_B200_HOME),
 # else the engine environment itself
 [ -z "${KIT_VENV:-}" ] && [ -x "$PAPER_B200_HOME/kitvenv130/bin/python" ] && KIT_VENV=$PAPER_B200_HOME/kitvenv130

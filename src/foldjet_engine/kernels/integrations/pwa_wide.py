@@ -26,6 +26,7 @@ from typing import Any, cast
 import torch
 import torch.nn.functional as F
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
 from foldjet_engine.kernels._compile import opaque
 
 H = 8

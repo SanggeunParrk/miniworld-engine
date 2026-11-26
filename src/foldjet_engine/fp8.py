@@ -4,7 +4,7 @@ The user-facing name is the backend **``engine-fp8``**: the engine ``cuda`` back
 the modules that select it (every other module, and every module by default, runs the bf16 / fp16 engine, bit-identical to 2.5.14)::
 
     TriangleMultiplication(128, backend="engine-fp8")         # or module.set_backend("engine-fp8"); a composite passes it to its parts
-    foldjet_engine.fp8.set_model("af3")                     # + the TriAttn FP8 routes validated for that model (or MINIWORLD_FP8_MODEL=af3)
+    foldjet_engine.fp8.set_model("af3")                     # + the TriAttn FP8 routes validated for that model (or FOLDJET_ENGINE_FP8_MODEL=af3)
 
 ``engine-fp8`` is not a class's ``backends`` entry (the judge, the registry and the measurers never see it): ``set_backend`` resolves it to
 ``cuda`` (``module.backend == "cuda"``, ``module.engine_fp8 is True``, ``module.backend_name == "engine-fp8"``) on every class that has a
@@ -21,8 +21,8 @@ does not open the FP8 scope and runs exactly the ``cuda`` backend (same bytes, o
 
 The lower-level switch (process wide, every ``cuda`` module) stays::
 
-    MINIWORLD_FP8=safe python run.py                          # environment: before the first import of the engine's kernels
-    MINIWORLD_FP8=safe MINIWORLD_FP8_MODEL=af3 python run.py   # + the TriAttn FP8 routes validated for that model
+    FOLDJET_ENGINE_FP8=safe python run.py                          # environment: before the first import of the engine's kernels
+    FOLDJET_ENGINE_FP8=safe FOLDJET_ENGINE_FP8_MODEL=af3 python run.py   # + the TriAttn FP8 routes validated for that model
     foldjet_engine.fp8.enable("safe")                       # API: at run time (after import), before the first forward
     foldjet_engine.fp8.enable("safe", model="af3")          # + the TriAttn FP8 routes validated for that model
 
@@ -33,14 +33,14 @@ these routes do not depend on the model.
 
 TriAttn FP8 runs **only for a validated model** (:data:`TRIATTN_MODELS`; decision 2026-11-17): the FP8 PV route on the call-site kinds checked
 end to end for that model, and e4m3 q / k on the fused d_pair-128 route only where that was checked too. The model is named once, either
-``MINIWORLD_FP8_MODEL=<model>`` next to ``MINIWORLD_FP8`` (read at import of the TriAttn kernels) or ``enable(preset, model=<model>)`` (run
-time; :func:`enable` does not read ``MINIWORLD_FP8_MODEL``). No model, or a model not in :data:`TRIATTN_MODELS` (e.g. Boltz-2):
+``FOLDJET_ENGINE_FP8_MODEL=<model>`` next to ``FOLDJET_ENGINE_FP8`` (read at import of the TriAttn kernels) or ``enable(preset, model=<model>)`` (run
+time; :func:`enable` does not read ``FOLDJET_ENGINE_FP8_MODEL``). No model, or a model not in :data:`TRIATTN_MODELS` (e.g. Boltz-2):
 TriAttn keeps the default fp16 core, bit-identical to FP8 off. q / k e4m3 is in ``safe`` for af3 although its module error (judge form) is
 above the module tolerance: the end-level AF3 FoldBench run with it on flagged 0 / 27 targets.
 
-Each route keeps its own switch (``MINIWORLD_TRIMUL_FP8``, ``MINIWORLD_OPM_FP8``, ``MINIWORLD_PWA_FP8``, ``MINIWORLD_TRANSITION_FP8``,
-``MINIWORLD_TOKEN_DIT_FP8``, ``MINIWORLD_ATOMDIT_FP8`` and their ``_GUARD`` / gate variables; TriAttn: ``h100_sm90.enable_fp8_pv_for``):
-with ``MINIWORLD_FP8`` set, a per-route variable that is set explicitly (also to the empty string = off) wins over the preset.
+Each route keeps its own switch (``FOLDJET_ENGINE_TRIMUL_FP8``, ``FOLDJET_ENGINE_OPM_FP8``, ``FOLDJET_ENGINE_PWA_FP8``, ``FOLDJET_ENGINE_TRANSITION_FP8``,
+``FOLDJET_ENGINE_TOKEN_DIT_FP8``, ``FOLDJET_ENGINE_ATOMDIT_FP8`` and their ``_GUARD`` / gate variables; TriAttn: ``h100_sm90.enable_fp8_pv_for``):
+with ``FOLDJET_ENGINE_FP8`` set, a per-route variable that is set explicitly (also to the empty string = off) wins over the preset.
 
 FP8 is outside the judge: no registry row, tolerance or ``backend_versions`` entry exists for it (registry dtypes ``float32|master``), no
 class lists ``engine-fp8`` in its ``backends``, and the judge tokens cover the default route only. Do not run the judge / measure tools with
@@ -63,6 +63,8 @@ import os
 from types import MappingProxyType
 from typing import Any
 
+import foldjet_engine._envcompat  # noqa: F401  (old MINIWORLD_* environment names)
+
 #: The FP8 backend's public name (engine 3.0.0): what ``backend=`` / ``set_backend`` and a runtime's backend option take.
 BACKEND = "engine-fp8"
 #: Its identifier where ``-`` cannot stand (Python names, config keys); ``set_backend`` takes it as well.
@@ -71,17 +73,17 @@ BACKEND_ID = "engine_fp8"
 BASE_BACKEND = "cuda"
 BACKEND_PRESET = "safe"
 
-#: the per-route environment variables of each preset (what ``MINIWORLD_FP8=<preset>`` makes the default of each route module)
+#: the per-route environment variables of each preset (what ``FOLDJET_ENGINE_FP8=<preset>`` makes the default of each route module)
 PRESETS = MappingProxyType(
     {
         "safe": MappingProxyType(
             {
-                "MINIWORLD_TRIMUL_FP8": "calib",
-                "MINIWORLD_OPM_FP8": "bound",
-                "MINIWORLD_PWA_FP8": "1",
-                "MINIWORLD_TRANSITION_FP8": "calib",
-                "MINIWORLD_TOKEN_DIT_FP8": "expand",
-                "MINIWORLD_ATOMDIT_FP8": "1",
+                "FOLDJET_ENGINE_TRIMUL_FP8": "calib",
+                "FOLDJET_ENGINE_OPM_FP8": "bound",
+                "FOLDJET_ENGINE_PWA_FP8": "1",
+                "FOLDJET_ENGINE_TRANSITION_FP8": "calib",
+                "FOLDJET_ENGINE_TOKEN_DIT_FP8": "expand",
+                "FOLDJET_ENGINE_ATOMDIT_FP8": "1",
             }
         ),
     }
@@ -106,7 +108,7 @@ TRIATTN_MODELS = MappingProxyType(
 )
 _NO_TRIATTN: tuple[frozenset[str], bool] = (frozenset(), False)
 
-#: Models whose FP8 run is wrong on the B200 (capability (10, 0)): every FP8 route stays off for them there (``MINIWORLD_FP8`` reads as off,
+#: Models whose FP8 run is wrong on the B200 (capability (10, 0)): every FP8 route stays off for them there (``FOLDJET_ENGINE_FP8`` reads as off,
 #: :func:`enable` acts as :func:`disable`), whatever the preset. Remove an entry only after an end-level check on the B200.
 B200_BLOCKED_MODELS = MappingProxyType(
     {
@@ -123,21 +125,21 @@ def _b200_blocked(model_name: str | None) -> bool:
 
 
 def preset() -> str | None:
-    """The preset ``MINIWORLD_FP8`` names (None: unset, ``0``, ``off`` or ``none``; also None on a B200 for a model of
-    :data:`B200_BLOCKED_MODELS` named by ``MINIWORLD_FP8_MODEL``)."""
-    v = os.environ.get("MINIWORLD_FP8", "").strip().lower()
+    """The preset ``FOLDJET_ENGINE_FP8`` names (None: unset, ``0``, ``off`` or ``none``; also None on a B200 for a model of
+    :data:`B200_BLOCKED_MODELS` named by ``FOLDJET_ENGINE_FP8_MODEL``)."""
+    v = os.environ.get("FOLDJET_ENGINE_FP8", "").strip().lower()
     if v in ("", "0", "off", "none"):
         return None
     if v not in PRESETS:
-        raise ValueError(f"MINIWORLD_FP8={v!r}: unknown preset (use one of {', '.join(PRESETS)}, or off)")
+        raise ValueError(f"FOLDJET_ENGINE_FP8={v!r}: unknown preset (use one of {', '.join(PRESETS)}, or off)")
     if _b200_blocked(model()):
         return None
     return v
 
 
 def model() -> str | None:
-    """The model ``MINIWORLD_FP8_MODEL`` names (lower case; None: unset or empty). Only read with ``MINIWORLD_FP8`` set, for the TriAttn part."""
-    v = os.environ.get("MINIWORLD_FP8_MODEL", "").strip().lower()
+    """The model ``FOLDJET_ENGINE_FP8_MODEL`` names (lower case; None: unset or empty). Only read with ``FOLDJET_ENGINE_FP8`` set, for the TriAttn part."""
+    v = os.environ.get("FOLDJET_ENGINE_FP8_MODEL", "").strip().lower()
     return v or None
 
 
@@ -149,7 +151,7 @@ def triattn_for(model_name: str | None) -> tuple[frozenset[str], bool]:
 
 
 def env(name: str, default: str | None = None) -> str | None:
-    """A route module's switch: the variable when it is set (also when set to ""), else the ``MINIWORLD_FP8`` preset's value, else ``default``."""
+    """A route module's switch: the variable when it is set (also when set to ""), else the ``FOLDJET_ENGINE_FP8`` preset's value, else ``default``."""
     if name in os.environ:
         return os.environ[name]
     p = preset()
@@ -171,13 +173,13 @@ B200_ROUTES: dict[str, str] = {
     "transition": "foldjet_engine.kernels.transition.cuda.fp8_sm100a",
 }
 #: B200 routes that are served at capability (10, 0) but are NOT in a slot replacement and NOT in the ``safe`` preset (their own interface, own switch variable;
-#: measured effect too small / outside the judge: docs/b200/fp8.md "Agent E"): slot -> module path. The atom DiT e4m3 rows route: ``MINIWORLD_ATOMDIT_FP8_B200`` (1 / all / pre / post).
+#: measured effect too small / outside the judge: docs/b200/fp8.md "Agent E"): slot -> module path. The atom DiT e4m3 rows route: ``FOLDJET_ENGINE_ATOMDIT_FP8_B200`` (1 / all / pre / post).
 B200_OPTIN: dict[str, str] = {
     "atom_dit": "foldjet_engine.kernels.augmented_attention.cuda.b200_atom.f8",
 }
 #: RTX 5090 (sm_120a, capability (12, 0)) route modules: slot -> module path (same interface as the H100 module of the slot; the same preset
-#: variables, so ``MINIWORLD_FP8=safe`` / ``engine-fp8`` turn on the same slots as on the H100, except the ones in :data:`SM120_PRESET_EXCLUDED`:
-#: the Transition is an explicit opt-in on the 5090, ``MINIWORLD_TRANSITION_FP8`` / alias ``_SM120``). Slots without an entry keep the H100 module.
+#: variables, so ``FOLDJET_ENGINE_FP8=safe`` / ``engine-fp8`` turn on the same slots as on the H100, except the ones in :data:`SM120_PRESET_EXCLUDED`:
+#: the Transition is an explicit opt-in on the 5090, ``FOLDJET_ENGINE_TRANSITION_FP8`` / alias ``_SM120``). Slots without an entry keep the H100 module.
 SM120_ROUTES: dict[str, str] = {
     "triattn": "foldjet_engine.kernels.triangle_attention.cuda.sm120_fp8",
     "trimul": "foldjet_engine.kernels.trimul_inproj.cuda.sm120_fp8",
@@ -190,8 +192,8 @@ SM120_ROUTES: dict[str, str] = {
 #: RTX 5090 routes outside any slot and preset (as :data:`B200_OPTIN`): none (the e4m3 Transition moved into :data:`SM120_ROUTES`).
 SM120_OPTIN: dict[str, str] = {}
 #: RTX 5090 slots whose module stays in SM120_ROUTES (status / route_stats / check / disable) but which a preset does NOT turn on: the e4m3 Transition
-#: (owner decision 2026-11-23, docs/fp8.md "RTX 5090": FoldForge end level 24 / 36 targets inside with it, 33 / 36 without; the H100 F11 finding).
-#: It runs only with ``MINIWORLD_TRANSITION_FP8=calib`` (alias ``_SM120``) set explicitly or ``fp8_sm120.POLICY`` set at run time.
+#: (owner decision 2026-11-23, docs/fp8.md "RTX 5090": FoldJet end level 24 / 36 targets inside with it, 33 / 36 without; the H100 F11 finding).
+#: It runs only with ``FOLDJET_ENGINE_TRANSITION_FP8=calib`` (alias ``_SM120``) set explicitly or ``fp8_sm120.POLICY`` set at run time.
 SM120_PRESET_EXCLUDED: frozenset[str] = frozenset({"transition"})
 
 
@@ -212,7 +214,7 @@ def arch() -> str:
 
 
 def serves_sm100(slot: str) -> bool:
-    """Whether the FP8 route ``slot`` (one of :data:`SLOTS`) has a B200 module in this tree (``engine-fp8`` / ``MINIWORLD_FP8`` then serve it at capability (10, 0))."""
+    """Whether the FP8 route ``slot`` (one of :data:`SLOTS`) has a B200 module in this tree (``engine-fp8`` / ``FOLDJET_ENGINE_FP8`` then serve it at capability (10, 0))."""
     path = B200_ROUTES.get(slot) or B200_OPTIN.get(slot)
     if path is None:
         return False
@@ -280,13 +282,13 @@ _MODEL: list[str | None] = [None]
 
 
 def set_model(name: str | None) -> None:
-    """The model ``engine-fp8`` modules run for (its TriAttn FP8 routes, :data:`TRIATTN_MODELS`); None: ``MINIWORLD_FP8_MODEL`` (read at each
+    """The model ``engine-fp8`` modules run for (its TriAttn FP8 routes, :data:`TRIATTN_MODELS`); None: ``FOLDJET_ENGINE_FP8_MODEL`` (read at each
     scope entry). A model outside :data:`TRIATTN_MODELS` keeps TriAttn on the default fp16 core. Process wide."""
     _MODEL[0] = name.strip().lower() if name else None
 
 
 def backend_model() -> str | None:
-    """The model of the ``engine-fp8`` backend: :func:`set_model`'s, else ``MINIWORLD_FP8_MODEL``."""
+    """The model of the ``engine-fp8`` backend: :func:`set_model`'s, else ``FOLDJET_ENGINE_FP8_MODEL``."""
     return _MODEL[0] or model()
 
 
@@ -391,16 +393,16 @@ def enable(name: str = "safe", *, model: str | None = None, guard: str | None = 
         return
     _ta, tm, opm, pwa, tr, td, ad = _modules()
     env_of = PRESETS[name]
-    tm.POLICY = env_of.get("MINIWORLD_TRIMUL_FP8") or None
-    opm.POLICY = env_of.get("MINIWORLD_OPM_FP8") or None
-    pwa.ENABLED = env_of.get("MINIWORLD_PWA_FP8") == "1"
+    tm.POLICY = env_of.get("FOLDJET_ENGINE_TRIMUL_FP8") or None
+    opm.POLICY = env_of.get("FOLDJET_ENGINE_OPM_FP8") or None
+    pwa.ENABLED = env_of.get("FOLDJET_ENGINE_PWA_FP8") == "1"
     # RTX 5090: the e4m3 Transition is outside the presets (SM120_PRESET_EXCLUDED): only its explicitly set variable turns it on
-    tr.POLICY = tr.explicit_policy() if arch() == "sm120" and "transition" in SM120_PRESET_EXCLUDED else env_of.get("MINIWORLD_TRANSITION_FP8") or None
-    td.PLACES = td._parse(env_of.get("MINIWORLD_TOKEN_DIT_FP8", ""))
-    ad.enable_fp8(ad._fp8_parts(env_of.get("MINIWORLD_ATOMDIT_FP8", "")))
+    tr.POLICY = tr.explicit_policy() if arch() == "sm120" and "transition" in SM120_PRESET_EXCLUDED else env_of.get("FOLDJET_ENGINE_TRANSITION_FP8") or None
+    td.PLACES = td._parse(env_of.get("FOLDJET_ENGINE_TOKEN_DIT_FP8", ""))
+    ad.enable_fp8(ad._fp8_parts(env_of.get("FOLDJET_ENGINE_ATOMDIT_FP8", "")))
     a8 = _atom_b200()
     if a8 is not None:  # B200: the rows route has its own variable and is not in a preset; an explicitly set variable wins (as env())
-        a8.enable(os.environ.get("MINIWORLD_ATOMDIT_FP8_B200", env_of.get("MINIWORLD_ATOMDIT_FP8_B200", "")))
+        a8.enable(os.environ.get("FOLDJET_ENGINE_ATOMDIT_FP8_B200", env_of.get("FOLDJET_ENGINE_ATOMDIT_FP8_B200", "")))
     enable_triattn(*triattn_for(model))
     if guard is not None:
         if guard not in ("sync", "lazy", "off"):

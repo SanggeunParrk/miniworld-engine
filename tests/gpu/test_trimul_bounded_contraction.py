@@ -4,7 +4,7 @@
   (its own full-K launch and the cuBLAS contraction), including a dead tile region, for every config and swizzle;
 - the module (TriangleMultiplication, cuda backend, inference) with the bounded route forced on its shape: bitwise the module with
   cuBLAS, at every position, on padded masks, a mask with holes and no mask;
-- a CUDA graph captured with one mask and replayed after another mask is copied into the same tensor (FoldForge R26 refreshes the mask per
+- a CUDA graph captured with one mask and replayed after another mask is copied into the same tensor (FoldJet R26 refreshes the mask per
   fold): equal to eager on the new mask (the live extents are recomputed on the device by every replay, never baked at capture).
 """
 

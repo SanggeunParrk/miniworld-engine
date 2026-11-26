@@ -163,7 +163,7 @@ def _prebuild_sm80():
     from foldjet_engine.kernels.pair_weighted_averaging.cuda import sm80 as pwa
 
     def plain(o):
-        return "groups" not in o  # projection biases: the sm_80 prologue adds them; count_offset: the epilogues' divisor (FoldForge R2)
+        return "groups" not in o  # projection biases: the sm_80 prologue adds them; count_offset: the epilogues' divisor (FoldJet R2)
 
     opm_rows = [
         r

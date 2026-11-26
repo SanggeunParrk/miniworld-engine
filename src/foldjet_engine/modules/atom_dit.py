@@ -47,7 +47,7 @@ Each class hard-codes its model's math (no option flags); :data:`ATOM_DIT_MODELS
       AtomDiTESMFold2       ESMFold2's release atom block: the same block (its own class, ESMFold2's constructor names)
       SWAAtomTransformer    ``n_block`` of them
 
-* FoldForge's ESMFold2 atom block with the atom pair (FoldForge R6), :class:`AtomDiTESMFold2Pair`: the AF3 block above over a 32 x 192
+* FoldJet's ESMFold2 atom block with the atom pair (FoldJet R6), :class:`AtomDiTESMFold2Pair`: the AF3 block above over a 32 x 192
   trunked pair with AdaptiveRMSNorm AdaLNs, raw gates, the +/- 64 rank window and q / k RMSNorm + rotary (``AtomDiT(model="esmfold2_pair")``).
 
 Each is a :class:`~foldjet_engine.modules.primitives.BackendModule`; ``_forward_pytorch`` is the reference.
@@ -384,7 +384,7 @@ class _LocalAtomDiT(BackendModule):
 
     # ------------------------------------------------------------------------------------------------------------ "triton"
     def _supports_triton(self, single, cond, pair, mask=None, uid=None, **kw) -> str | None:
-        # ``uid`` positional as in the forward that takes it (AtomDiTChai1): FoldForge asks ``unsupported(*forward args)``
+        # ``uid`` positional as in the forward that takes it (AtomDiTChai1): FoldJet asks ``unsupported(*forward args)``
         if kw:
             return f"{', '.join(sorted(kw))} (not an input of the block)"
         if not single.is_cuda:
@@ -591,8 +591,8 @@ class _LocalAtomDiT(BackendModule):
         """``single`` / ``cond`` [S, 1, N, d] (S samples on the augmentation axis), the trunked ``pair`` [1, nwin, 32, 128, d_pair], the key
         ``mask`` [1, N] (real atoms first). Stream ``atom_folds`` (the multi-fold contract, docs/modules.md): ``depth`` = F folds (trunk_seeds of
         one input), ``single`` [S, F, N, d], ``cond`` one per fold [1, F, N, d] expanded over the S samples, ``pair`` [F, nwin, 32, 128, d_pair],
-        one key mask [1, N] expanded over the folds (FoldForge's grouped sampler step). A ``*_shared_cond`` stream (``atom_single_shared_cond``,
-        ``atom_folds_shared_cond``): ``cond`` [1, F, N, d] expanded (stride 0) over the S samples, as FoldForge's ``AtomDiTStack`` calls the
+        one key mask [1, N] expanded over the folds (FoldJet's grouped sampler step). A ``*_shared_cond`` stream (``atom_single_shared_cond``,
+        ``atom_folds_shared_cond``): ``cond`` [1, F, N, d] expanded (stride 0) over the S samples, as FoldJet's ``AtomDiTStack`` calls the
         block; the measurers keep it expanded (requirements/README.md)."""
         d_single, d_cond, d_pair = self.transition.d_hidden, self.transition.d_cond, self.attention.ln_pair.normalized_shape[0]
         stream, shared = shared_cond_stream(stream)
@@ -891,7 +891,7 @@ class AtomDiTOpenFold3(_LocalAtomDiT):
     layernorms, OF3 ``CrossAttentionPairBias.layer_norm_a_q`` / ``_k``), the slid 128-key window (AF3 ``features.py``; IntelliFold2's JAX
     release runs this code). ``key_window="slide_qblock"``: IntelliFold2's torch release; ``"pad"``: the clipped window.
 
-    ``mask_form`` (FoldForge R13): ``"keys"`` (the default, as every atom DiT block) switches every masked key off for every query; ``"af3"``
+    ``mask_form`` (FoldJet R13): ``"keys"`` (the default, as every atom DiT block) switches every masked key off for every query; ``"af3"``
     is AlphaFold 3's own form, whose mask term touches only the pairs where BOTH the query and the key are padding (``+1e9`` there), so a
     real query reads every key of its window, padding included. The forms differ only below 128 real atoms: from 128 on the slid window
     (``key_window="slide"``, the only window this form is defined for) lies inside the real atoms; below it every window holds the N real
@@ -1126,7 +1126,7 @@ class AtomDiTChai1(MasterEntryCast, VariantAtomCuda, _LocalAtomDiT):
     Invariant (shared K / V AdaLN): the release's ``single_layer_norm`` output feeds the queries and the keys / values (no
     ``attention.ada_ln_kv``); as for :class:`AtomDiTBoltz2`, a separate K / V AdaLN in a checkpoint layout must equal the query one.
 
-    There is no circular window (FoldForge R9): chai_lab 0.6.1 ``get_qkv_indices_for_blocks`` returns ``kv_mask = (kv_indices < N) &
+    There is no circular window (FoldJet R9): chai_lab 0.6.1 ``get_qkv_indices_for_blocks`` returns ``kv_mask = (kv_indices < N) &
     (kv_indices >= 0)`` before ``kv_indices % N`` (the ``%`` only indexes) and ``get_block_atom_pair_mask`` ANDs it in, so a wrapped key is never
     attended: ``"pad"`` + ``uid`` is the release for every system, also one whose conformer covers both ends of the atom list and one under
     128 atoms (tests/cpu/test_chai1_key_window.py compares the attended keys with a transcription of the release's mask)."""
@@ -2259,7 +2259,7 @@ class AtomDiTESMFold2(AtomDiTMiniWorld):
     ESMFold2's constructor: ``forward(x [A * B, S, d_single], cond [A * B, S, d_cond], attention_params)``
     (:func:`~foldjet_engine.modules.functional.build_attention_params`). ``backend="anthropic"``: ESMFold2's own band core.
 
-    Not FoldForge's ESMFold2 atom stack (FoldForge R6): that one is the AF3 block over a 32 x 192 atom pair (a pair bias this block has no
+    Not FoldJet's ESMFold2 atom stack (FoldJet R6): that one is the AF3 block over a 32 x 192 atom pair (a pair bias this block has no
     input for), :class:`AtomDiTESMFold2Pair` (``AtomDiT(model="esmfold2_pair")``); no option turns one into the other."""
 
     version = 1  # human-managed: bump when a change alters this class's accuracy or speed results
@@ -2570,14 +2570,14 @@ class SWAAtomTransformer(BackendModule):
         return {"q": q, "c": c, "attention_params": params}
 
 
-# ================================================================ ESMFold2's atom block with the atom pair (FoldForge R6)
+# ================================================================ ESMFold2's atom block with the atom pair (FoldJet R6)
 #: The 192-key subset and the +/- 64 rank window of :class:`AtomDiTESMFold2Pair`.
 ESM_KEYS, ESM_HALF = 192, 64
 
 
 def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
     """Rotary on the head axis ``x [..., N, h, d]`` with per-atom tables ``cos`` / ``sin`` [..., N, r] (r <= d / 2), split into halves:
-    channel ``c < r`` pairs with ``c + r``, ``(a, b) -> (a cos - b sin, b cos + a sin)``; channels from ``2 r`` on pass unchanged (FoldForge
+    channel ``c < r`` pairs with ``c + r``, ``(a, b) -> (a cos - b sin, b cos + a sin)``; channels from ``2 r`` on pass unchanged (FoldJet
     ``diffusion_transformer.apply_rope``: tiled tables, not interleaved)."""
     r = cos.shape[-1]
     c, s = cos[..., None, :].to(x.dtype), sin[..., None, :].to(x.dtype)
@@ -2586,7 +2586,7 @@ def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.T
 
 
 def _rms(x: torch.Tensor) -> torch.Tensor:
-    """Affine-free RMSNorm over the last axis at float32's epsilon (FoldForge ``RMSNorm``, ESMFold2's ``rope_norm``)."""
+    """Affine-free RMSNorm over the last axis at float32's epsilon (FoldJet ``RMSNorm``, ESMFold2's ``rope_norm``)."""
     return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + RMS_EPS)
 
 
@@ -2622,7 +2622,7 @@ class _ESMTransition(nn.Module):
 
 
 class AtomDiTESMFold2Pair(BackendModule):
-    """FoldForge's ESMFold2 / ESMFold2-fast atom block (FoldForge R6; ``dense/diffusion_transformer.py`` ``CrossAttention`` +
+    """FoldJet's ESMFold2 / ESMFold2-fast atom block (FoldJet R6; ``dense/diffusion_transformer.py`` ``CrossAttention`` +
     ``DiffusionTransition`` under ``spec.ESMFOLD2``): AlphaFold 3's atom block -- parallel K / V AdaLN of the raw atoms, the slid key
     window, a pair bias from the trunked atom pair, the sequential schedule -- with four changes:
 
@@ -2632,11 +2632,11 @@ class AtomDiTESMFold2Pair(BackendModule):
       :func:`~foldjet_engine.modules.functional.slide_starts` with ``keys=192``) in which query ``i`` sees key ``j`` only when
       ``|i - j| <= 64`` (the rank among the real atoms, which come first);
     * q and k pass an affine-free per-head RMSNorm and a rotary with per-atom tables the caller supplies: ``forward(..., rope=(cos, sin))``,
-      each ``[B, N, r]``, ``r <= head_dim / 2`` (the keys take their own atoms' rows; FoldForge ``build_atom_rope``).
+      each ``[B, N, r]``, ``r <= head_dim / 2`` (the keys take their own atoms' rows; FoldJet ``build_atom_rope``).
 
     ``single`` / ``cond`` ``[A, B, N, d]``, trunked ``pair`` ``[B, nwin, 32, 192, d_pair]`` (the window's keys laid out from its first key,
-    as FoldForge's ``pair_cond`` gathered with the same subsets), key ``mask`` ``[B, N]`` (real atoms first). Not :class:`AtomDiTESMFold2`:
-    that is ESMFold2's released pair-free ``SWAAtomBlock`` (fused ``Wqkv``, adaLN-Zero, 3D RoPE inside); this is the block FoldForge's
+    as FoldJet's ``pair_cond`` gathered with the same subsets), key ``mask`` ``[B, N]`` (real atoms first). Not :class:`AtomDiTESMFold2`:
+    that is ESMFold2's released pair-free ``SWAAtomBlock`` (fused ``Wqkv``, adaLN-Zero, 3D RoPE inside); this is the block FoldJet's
     ESMFold2 port builds (``AtomDiT(model="esmfold2_pair")``).
 
     Backends: ``"pytorch"`` (the reference), ``"triton"`` (the window attention core on ``kernels/augmented_attention/triton/window.py``, the
@@ -2809,7 +2809,7 @@ class AtomDiTESMFold2Pair(BackendModule):
 
     def make_inputs(self, *, length, samples, depth, dtype, device, generator, stream=None) -> dict:
         """``single`` / ``cond`` [S, 1, N, d] (S samples), the trunked ``pair`` [1, nwin, 32, 192, d_pair], the key ``mask`` [1, N] (real atoms
-        first, padding inside the last query window) and the rotary tables ``rope`` [1, N, head_dim / 2] (fp32: FoldForge builds them so).
+        first, padding inside the last query window) and the rotary tables ``rope`` [1, N, head_dim / 2] (fp32: FoldJet builds them so).
         Stream ``atom_single_shared_cond``: ``cond`` [1, 1, N, d] expanded (stride 0) over the S samples (requirements/README.md)."""
         d_single, d_cond = self.transition.d_hidden, self.transition.d_cond
         shared = shared_cond_stream(stream)[1]

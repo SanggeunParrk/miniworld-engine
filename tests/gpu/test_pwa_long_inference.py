@@ -1,4 +1,4 @@
-"""E3 (FoldForge 5I28): ``MSAPairWeightedAveraging``'s cuda backend serves inference past 1024 tokens at the 8 x 8 / 8 x 16 widths (AF3 / OpenFold3 /
+"""E3 (FoldJet 5I28): ``MSAPairWeightedAveraging``'s cuda backend serves inference past 1024 tokens at the 8 x 8 / 8 x 16 widths (AF3 / OpenFold3 /
 Protenix-v1, Protenix-v2, ESMFold2, OpenDDE) -- H100 ``pwa_wide`` up to 2048, A100 ``pwa_sm80`` up to 2048 (the pair forward's row of
 logits in bf16 past what fp32 holds) -- and at the 8 x 32 widths (Boltz-2 / RF3, Chai-1, IntelliFold2: H100 ``pwa_train`` / ``pwa_wide``'s
 BIG build, A100 ``pwa_sm80`` / ``pwa_wide_sm80``), and matches the float64 reference as closely as the ``pytorch`` backend does; training past 1024 is refused with a reason."""
@@ -32,7 +32,7 @@ def _module(d_msa: int, d_pair: int, d_hidden: int, gen: torch.Generator) -> MSA
         (128, 256, 16, 1536),
         (128, 384, 8, 1536),
         (128, 384, 8, 2048),
-        # the 8 x 32 widths (FoldForge 5I28): boltz2 / rosettafold3, chai1, intellifold2 (the BIG build; at 2048 a float32 reference: float64 does not fit)
+        # the 8 x 32 widths (FoldJet 5I28): boltz2 / rosettafold3, chai1, intellifold2 (the BIG build; at 2048 a float32 reference: float64 does not fit)
         (64, 128, 32, 2048),
         (64, 256, 32, 1536),
         (64, 256, 32, 2048),

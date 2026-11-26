@@ -1,4 +1,4 @@
-"""FoldForge API requests (docs: modules.md): R4 the ``protenix_v2`` triangle key, R5 separate triangle keys of a PairformerBlock, R10 the DiT
+"""FoldJet API requests (docs: modules.md): R4 the ``protenix_v2`` triangle key, R5 separate triangle keys of a PairformerBlock, R10 the DiT
 stacks and ``from_shared_pair``, R12 ``parallel_residual``, R14 the documented invariants (shared K / V AdaLN, RoseTTAFold3's bias-free
 query), R18 the multi-fold contract of the DiT blocks (one call over B folds == B calls of one fold) -- on the ``pytorch`` reference, CPU."""
 

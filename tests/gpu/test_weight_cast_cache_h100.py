@@ -1,4 +1,4 @@
-"""FoldForge (2026-11-13): with fp32 master weights under bf16 activations, the H100 TriMul inference (d_pair 256 path) and the generic
+"""FoldJet (2026-11-13): with fp32 master weights under bf16 activations, the H100 TriMul inference (d_pair 256 path) and the generic
 Transition inference cast their weights on every call (2712 copy launches per ESMFold2 n = 1 trunk; ~1200 per OpenDDE fold). The casts
 are now made once per parameter version (``kernels._capture.param_forms``): a repeat call launches no cast, the output bits are those of
 an uncached call, and an in-place weight update is seen by the next call.
