@@ -1,6 +1,6 @@
 # foldjet-engine 1.0.0
 
-**miniworld-engine is renamed foldjet-engine.** 1.0.0 is miniworld-engine 3.0.12 under the new name: the same code, the same prebuilt kernels (byte for byte), the same judge state. Base: `v3.0.12` (`44a0fad3a`); rename commit `4c3269398`; repository tidy-up (README, docs index, release notes under `docs/release-notes/`, `tools/`) `d2a05ca31`..`6cf75c747`; tag `foldjet-engine-v1.0.0` (the name `v1.0.0` belongs to miniworld-engine 1.0.0 of 2026-08-25). GitHub: `SanggeunParrk/foldjet-engine` (the old `miniworld-engine` URL redirects).
+**miniworld-engine is renamed foldjet-engine.** 1.0.0 is miniworld-engine 3.0.12 under the new name: the same code, the same prebuilt kernels (byte for byte), the same judge state. Base: `v3.0.12` (`44a0fad3a`); rename commit `4c3269398`; repository tidy-up (README, docs index, release notes under `docs/release-notes/`, `tools/`) `d2a05ca31`..`6cf75c747`; tag `foldjet-engine-v1.0.0` (the name `v1.0.0` belongs to miniworld-engine 1.0.0 of 2026-08-25). GitHub: `CSSB-SNU/foldjet-engine` (moved from `SanggeunParrk/foldjet-engine`; the old URLs redirect).
 
 ## What changed
 
