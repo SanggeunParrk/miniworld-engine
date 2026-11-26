@@ -16,7 +16,7 @@
 
 ## What did not change (on purpose)
 
-Everything that enters a prebuilt kernel's key or is compiled into a binary: every C / C++ / CUDA file, the extension and cubin names (`miniworld_*`), the `--miniworld-gencode` / `--miniworld-ptx` flag markers, `-DMINIWORLD_*`, the three `MINIWORLD_*` switches the binaries read themselves (`A100_CLEANUP`, `TRIATTN_B200_PDL`, `TRIATTN_B200_L128_GB`: set the new `FOLDJET_ENGINE_*` name and it is copied to the old one), the `torch.library` namespaces. Also the requirements tables, judge tokens and model / class names (the judge keys on them), and the JIT / header cache directory names (`miniworld_engine_jit`, `miniworld_engine_headers`) so existing caches stay valid. Historical records (release notes, measurement records) are left as written.
+Everything that enters a prebuilt kernel's key or is compiled into a binary: every C / C++ / CUDA file, the extension and cubin names (`miniworld_*`), the `--miniworld-gencode` / `--miniworld-ptx` flag markers, `-DMINIWORLD_*`, the three `MINIWORLD_*` switches the binaries read themselves (`A100_CLEANUP`, `TRIATTN_B200_PDL`, `TRIATTN_B200_L128_GB`: set the new `FOLDJET_ENGINE_*` name and it is copied to the old one), the `torch.library` namespaces. Also the requirements tables, judge tokens and model / class names (the judge keys on them). The JIT / header cache directories did move (above), with a fallback to the old ones. Historical records (release notes, measurement records) are left as written.
 
 ## Proof that no kernel changed
 
@@ -27,16 +27,16 @@ Everything that enters a prebuilt kernel's key or is compiled into a binary: eve
 ## Verification
 
 ```
-079637a7da53c4de116e143b364881e9f073ab654f1674a20ac8b8448e23cb99  foldjet_engine-1.0.0-py3-none-any.whl
+8f9714874b8205b091f9c2c8e8839aa4d1312edc44052419096d59e067756411  foldjet_engine-1.0.0-py3-none-any.whl
 2e1482e3937651d9da76b0152c9c5c79a5dd7d028235b62e44c5a8b7ef00d9f9  foldjet_engine_kernels_sm100_cu129-1.0.0-cp312-cp312-manylinux_2_28_x86_64.whl
 3c62a8b710de541368c149a4a8f18b58600ec5eed6bd2b045668663ce2403981  foldjet_engine_kernels_sm100_cu129_part2-1.0.0-cp312-cp312-manylinux_2_28_x86_64.whl
 300898a56be9de006139c0fd31170c6f5405a91e18d0c34dd1fe42573018aadb  foldjet_engine_kernels_sm120_cu129-1.0.0-cp312-cp312-manylinux_2_28_x86_64.whl
 c4e225cbd0cfd8bc046edc11610369d5e4417e3548f98e4ab836ee05f9e788b6  foldjet_engine_kernels_sm80_cu129-1.0.0-cp312-cp312-manylinux_2_28_x86_64.whl
 2d4351cd362b060dd70b3583284ef00f69ed218258c40fcaed2bbb4d7e547ccb  foldjet_engine_kernels_sm90_cu129-1.0.0-cp312-cp312-manylinux_2_28_x86_64.whl
-82e0376323c9c8d35f4418be4c9cf29570caea40a3a8ea7b1269614ae01a2ca3  foldjet_engine-1.0.0.tar.gz
+4f790842072ffdcd117b9417aed4cd43a303ff30b9d313df11437c4c10aec795  foldjet_engine-1.0.0.tar.gz
 ```
 
-- H100, installed wheels (empty site directory, no repo, no nvcc, empty JIT cache): 581 / 581 sm90 artifacts resolved from `foldjet_engine/_prebuilt`, 0 compiled, JIT cache empty; `import miniworld_engine.kernels._nvcc is foldjet_engine.kernels._nvcc`: True; capture API imports.
+- H100, installed wheels (empty site directory, no repo, no nvcc, empty JIT cache): 581 / 581 sm90 artifacts resolved from `foldjet_engine/_prebuilt`, 0 compiled, JIT cache empty; `import miniworld_engine.kernels._nvcc is foldjet_engine.kernels._nvcc`: True; capture API imports; repeated with the engine wheel rebuilt after the environment-name change: same result, and `MINIWORLD_OPM_FP8=bound` is read as `FOLDJET_ENGINE_OPM_FP8` (one FutureWarning).
 - B200, installed wheels (engine + both sm100 wheels; NVIDIA B200, torch 2.13.0+cu129): 841 / 841 sm100 artifacts resolved, 0 compiled, JIT cache empty; ldd of the 76 `.so`: 0 unresolved, 0 CUDA-13 links.
 - CPU tests on this tree: all 30 files of tests/cpu passed (e.g. imports 1038, requirements 1194, modules 500, supports_signature 312, init 261 passed / 2 skipped).
 - `twine check`: 7 of 7 PASSED.
