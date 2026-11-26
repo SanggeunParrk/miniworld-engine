@@ -54,30 +54,34 @@ Generated from the manifests in the tree (`records.missing(op, card, mode=)`, `b
 
 | op | A100 80GB PCIe (sm80) | RTX A5000 (sm86) | RTX A6000 (sm86) | H100 / B200 | any other card |
 |---|---|---|---|---|---|
-| Transition | CUDA at d=128, n=4 (a call those kernels turn down asks the record); else warns (1 of 6 inference, 3 of 10 training) | warns (1 / 3 of 10) | warns (1 / 3 of 10) | CUDA, else PyTorch | warns, PyTorch |
-| TriangleMultiplication (+ bidirectional, `ops.triangle_multiplicative_update` and its bidirectional form) | portable inference; training warns (3 of 13) | portable inference; training warns (3 of 13) | portable inference; training warns (3 of 13) | CUDA, else PyTorch | warns, PyTorch |
+| Transition | CUDA at d=128, n=4 (a call those kernels turn down asks the record); else portable (bf16 and fp32 rows `ok`) | warns (1 / 3 of 10) | warns (1 / 3 of 10) | CUDA, else PyTorch | warns, PyTorch |
+| TriangleMultiplication (+ bidirectional, `ops.triangle_multiplicative_update` and its bidirectional form) | portable (inference and training) | portable inference; training warns (3 of 13) | portable inference; training warns (3 of 13) | CUDA, else PyTorch | warns, PyTorch |
 | TriangleAttention (+ bidirectional, bias-only) | portable | portable | portable | CUDA, else PyTorch | warns, PyTorch |
-| AdaptiveLayerNorm | warns (2 of 5 inference, 2 of 10 training) | same | same | CUDA on H100, PyTorch on B200 | warns, PyTorch |
-| ConditionedTransition | warns (2 of 10 inference, 3 of 21 training) | warns (2 / 3 of 21) | warns (2 / 4 of 21) | CUDA on H100, PyTorch on B200 | warns, PyTorch |
-| AugmentedAttention / AttentionPairBias | warns (2 of 9 inference, 3 of 20 training) | same | warns (2 of 9 / 2 of 20) | CUDA, else PyTorch | warns, PyTorch |
-| OuterProductMean | warns (3 of 3 inference, 8 of 8 training) | same | same | CUDA, else PyTorch | warns, PyTorch |
-| MSAPairWeightedAveraging | warns (3 inference, 7 training of 7) | same | same | CUDA, else PyTorch | warns, PyTorch |
+| AdaptiveLayerNorm | portable (bf16 and fp32) | warns (2 of 5 inference, 2 of 10 training) | warns (2 of 5 inference, 2 of 10 training) | CUDA on H100, PyTorch on B200 | warns, PyTorch |
+| ConditionedTransition | portable inference (bf16, fp32) and fp32 training; bf16 training warns (1 of 21: `cond_transition_fwd_b2b_saveact_triton`, row `failed`, see `records/a100_triton_record_20261101.md`) | warns (2 / 3 of 21) | warns (2 / 4 of 21) | CUDA on H100, PyTorch on B200 | warns, PyTorch |
+| AugmentedAttention / AttentionPairBias | portable (bf16 and fp32, inference and training) | warns (2 of 9 inference, 3 of 20 training) | warns (2 of 9 / 2 of 20) | CUDA, else PyTorch | warns, PyTorch |
+| OuterProductMean | portable (bf16; the kernels declare no fp32) | warns (3 of 3 inference, 8 of 8 training) | warns (3 of 3 inference, 8 of 8 training) | CUDA, else PyTorch | warns, PyTorch |
+| MSAPairWeightedAveraging | portable (bf16; the kernels declare no fp32) | warns (3 inference, 7 training of 7) | warns (3 inference, 7 training of 7) | CUDA, else PyTorch | warns, PyTorch |
 | RMSNorm | portable | warns (1 inference, 2 training of 2) | same | CUDA | warns, PyTorch |
 | LayerNorm | portable (forward and backward; asked per call: training and fp32 calls too) | same | same | CUDA (general kernel) | warns, PyTorch |
-| SWA atom attention (QK norm + RoPE, gate) | warns (3 of 5 / 4 of 8) | warns (4 of 5 / 6 of 8) | warns (4 of 5 / 6 of 8) | CUDA, else PyTorch | warns, PyTorch |
-| SWADiTBlock (and ESMFold2's `SWAAtomTransformer` fused block) | warns (3 / 9 of 11) | warns (4 / 11 of 11) | warns (4 / 11 of 11) | CUDA, else PyTorch | warns, PyTorch |
+| SWA atom attention (QK norm + RoPE, gate) | portable | warns (4 of 5 / 6 of 8) | warns (4 of 5 / 6 of 8) | CUDA, else PyTorch | warns, PyTorch |
+| SWADiTBlock (and ESMFold2's `SWAAtomTransformer` fused block) | portable | warns (4 / 11 of 11) | warns (4 / 11 of 11) | CUDA, else PyTorch | warns, PyTorch |
 | RMSNorm + adaLN modulation (`ops.rms_norm_modulation`; the ESMFold2 atom block, SWADiTBlock's per-op path) | portable | warns (1 of 1 / 2 of 2) | same | Triton through the facade, PyTorch in the blocks | warns, PyTorch |
 | `ops.layer_norm_linear` (fp32-statistics LayerNorm + projection) | portable | portable | portable | Triton (facade) | warns, PyTorch |
-| `ops.swiglu_ffn`, `ops.conditioned_transition` (the SwiGLU tail), the ESMFold2 atom FFN | portable inference; training warns (1 of 2) | same | same | Triton (facade), PyTorch in the blocks | warns, PyTorch |
-| `ops.gated_residual`, the bias-only DiT pair LayerNorm + bias projection (`bias_only_pair_bias`) | warns (registered 2026-10-31: no row on this card yet) | same | same | Triton | warns, PyTorch |
-| ProteinMPNN `auto` (message reduction; edge MLP on sm_86) | warns (message: 3 of 3 inference, 4 of 4 training) | training portable; no-grad warns (the no-save fusion, registered 2026-10-31, has no row yet); edge MLP portable | warns (message 3 of 3 / 4 of 4, edge MLP 2 of 2) | Triton message reduction (as before) | warns, PyTorch |
-| La-Proteina pair builders (`pair_embed_geom`, `pair_embed_ca`, `pair_embed_adaln`) | warns (2 inference, 5 training of 5 for the encoder / decoder pair; 1 / 4 of 4 for the initial pair) | same | same | CUDA on H100, PyTorch on B200 | warns, PyTorch |
-| Token-pair initialisation (`token_pair_init`) | warns (1 inference, 4 training of 4) | same | same | CUDA | warns, PyTorch |
-| smooth lDDT (`kernels.smooth_lddt`, the diffusion loss; called directly, not a module) | warns (no record) | warns | warns | CUDA | warns, PyTorch |
-| Diffusion sampler glue (`kernels.sampler_ops`: `augment_noise`, `align_euler`, `pool_atoms`; called directly, not a module) | warns (no record) | warns | warns | CUDA | warns, PyTorch |
-| LocalDiTBlock window attention (AF3 / Protenix / OpenFold3 / OpenDDE / ESMFold2 atom blocks) | warns (1 of 3 inference, 3 of 5 training) | same | same | CUDA (bf16 / fp32 inference), else PyTorch | warns, PyTorch |
-| DiTVariantStack (Boltz-2 / RoseTTAFold3 / Chai-1 token stacks) | portable inference; training warns (1 of 7: the fp32 row of the split backward's reduce) | same | portable | CUDA (bf16 inference), else PyTorch | warns, PyTorch |
-| AtomDiTVariantStack (their atom stacks) | warns (1 of 3 inference, 3 of 5 training) | same | same | CUDA (bf16 inference), else PyTorch | warns, PyTorch |
+| `ops.swiglu_ffn`, `ops.conditioned_transition` (the SwiGLU tail), the ESMFold2 atom FFN | portable (inference and training) | portable inference; training warns (1 of 2) | portable inference; training warns (1 of 2) | Triton (facade), PyTorch in the blocks | warns, PyTorch |
+| `ops.gated_residual`, the bias-only DiT pair LayerNorm + bias projection (`bias_only_pair_bias`) | portable (rows recorded 2026-11-01) | warns (registered 2026-10-31: no row on this card yet) | warns (registered 2026-10-31: no row on this card yet) | Triton | warns, PyTorch |
+| ProteinMPNN `auto` (message reduction; edge MLP on sm_86) | message reduction and edge MLP portable (bf16, inference and training); the edge-tail / node-message backward kernels are `failed` (no `auto` path) | training portable; no-grad warns (the no-save fusion, registered 2026-10-31, has no row yet); edge MLP portable | warns (message 3 of 3 / 4 of 4, edge MLP 2 of 2) | Triton message reduction (as before) | warns, PyTorch |
+| La-Proteina pair builders (`pair_embed_geom`, `pair_embed_ca`, `pair_embed_adaln`) | portable (bf16) | warns (2 inference, 5 training of 5 for the encoder / decoder pair; 1 / 4 of 4 for the initial pair) | warns (2 inference, 5 training of 5 for the encoder / decoder pair; 1 / 4 of 4 for the initial pair) | CUDA on H100, PyTorch on B200 | warns, PyTorch |
+| Token-pair initialisation (`token_pair_init`) | portable (bf16) | warns (1 inference, 4 training of 4) | warns (1 inference, 4 training of 4) | CUDA | warns, PyTorch |
+| smooth lDDT (`kernels.smooth_lddt`, the diffusion loss; called directly, not a module) | portable | warns | warns | CUDA | warns, PyTorch |
+| Diffusion sampler glue (`kernels.sampler_ops`: `augment_noise`, `align_euler`, `pool_atoms`; called directly, not a module) | portable | warns | warns | CUDA | warns, PyTorch |
+| LocalDiTBlock window attention (AF3 / Protenix / OpenFold3 / OpenDDE / ESMFold2 atom blocks) | portable | warns (1 of 3 inference, 3 of 5 training) | warns (1 of 3 inference, 3 of 5 training) | CUDA (bf16 / fp32 inference), else PyTorch | warns, PyTorch |
+| DiTVariantStack (Boltz-2 / RoseTTAFold3 / Chai-1 token stacks) | portable | portable inference; training warns (1 of 7: the fp32 row of the split backward's reduce) | portable | CUDA (bf16 inference), else PyTorch | warns, PyTorch |
+| AtomDiTVariantStack (their atom stacks) | portable | warns (1 of 3 inference, 3 of 5 training) | warns (1 of 3 inference, 3 of 5 training) | CUDA (bf16 inference), else PyTorch | warns, PyTorch |
+
+**A100 column, 2026-11-01:** from `records.missing` over the A100 manifest after the full `run_all` of `9cf93c27` (bf16 and fp32; procedure and
+numbers in [records/a100_triton_record_20261101.md](records/a100_triton_record_20261101.md)); the A5000 / A6000 columns are unchanged.
+The paragraphs below that say the Ampere cards hold no row for OuterProductMean, AdaLN, ... describe A5000 / A6000 only.
 
 **Parts that route through other ops.** `BiasOnlyDiTBlock` builds its AdaptiveLayerNorm, ConditionedTransition and pair LayerNorm with the
 block's implementation, so it has no row of its own: on a card it takes the portable kernels of those three rows when each is recorded
